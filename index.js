@@ -240,12 +240,13 @@ app.get("/api/wechat-cs/config-status", (req, res) => {
 const port = process.env.PORT || 80;
 
 async function bootstrap() {
-  await initDB();
+  // DB 初始化失败不影响 wechat-cs 接口运行
+  try { await initDB(); } catch (e) { console.warn("DB 初始化失败（不影响客服消息）:", e.message); }
+
   app.listen(port, () => {
     console.log("启动成功，端口:", port);
-    console.log("云托管消息推送: POST /api/wechat-cs (JSON 模式)");
-    console.log("备用接口: POST /api/wechat-cs/send-by-code");
+    console.log("微信客服下发: POST /api/wechat-cs/send-by-code");
   });
 }
 
-bootstrap();
+bootstrap().catch(e => { console.error("启动失败:", e.message); process.exit(1); });
