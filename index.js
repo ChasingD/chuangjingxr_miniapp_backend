@@ -145,26 +145,47 @@ app.post("/api/wechat-cs", async (req, res) => {
  */
 app.post("/api/wechat-cs/send-by-code", async (req, res) => {
   const { code, linkUrl } = req.body || {};
+
+  // callContainer 可能自动注入 x-wx-openid，如果存在则跳过 code2session
+  const headerOpenId = req.headers["x-wx-openid"] || "";
+  console.log(`[CS] send-by-code headers: x-wx-openid=${headerOpenId || "(无)"}`);
+
+  // 优先使用 header 中的 openid（callContainer 内网注入），否则走 code2session
+  let openId = headerOpenId;
+
+  if (!openId && !code) return res.send({ code: 400, msg: "缺少 openid 或 code 参数", data: null });
+
+  const appId = process.env.WECHAT_APPID || "";
+  const appSecret = process.env.WECHAT_APPSECRET || "";
   const appId = process.env.WECHAT_APPID || "";
   const appSecret = process.env.WECHAT_APPSECRET || "";
 
-  if (!code) return res.send({ code: 400, msg: "缺少 code 参数", data: null });
-  if (!appId || !appSecret) return res.send({ code: 500, msg: "WECHAT_APPID/APPSECRET 未配置", data: null });
+  if (!openId) {
+    // callContainer 没带 openid → 走传统 code2session（需要 appid/secret）
+    if (!appId || !appSecret) return res.send({ code: 500, msg: "WECHAT_APPID/APPSECRET 未配置", data: null });
+    if (!code) return res.send({ code: 400, msg: "缺少 code 参数", data: null });
 
+    try {
+      const sessionUrl = `https://api.weixin.qq.com/sns/jscode2session?appid=${appId}&secret=${appSecret}&js_code=${code}&grant_type=authorization_code`;
+      const sessionData = await new Promise((resolve, reject) => {
+        https.get(sessionUrl, (resp) => {
+          let d = "";
+          resp.on("data", (c) => (d += c));
+          resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+        }).on("error", reject);
+      });
+      if (sessionData.errcode) throw new Error(sessionData.errmsg);
+      openId = sessionData.openid;
+    } catch (err) {
+      console.error("[CS] code2session 异常:", err.message);
+      return res.send({ code: 500, msg: err.message || "code2session 失败", data: null });
+    }
+  }
+
+  // 获取 access_token 并发送客服消息
   try {
-    // code2session
-    const sessionUrl = `https://api.weixin.qq.com/sns/jscode2session?appid=${appId}&secret=${appSecret}&js_code=${code}&grant_type=authorization_code`;
-    const sessionData = await new Promise((resolve, reject) => {
-      https.get(sessionUrl, (resp) => {
-        let d = "";
-        resp.on("data", (c) => (d += c));
-        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
-      }).on("error", reject);
-    });
+    if (!appId || !appSecret) return res.send({ code: 500, msg: "WECHAT_APPID/APPSECRET 未配置", data: null });
 
-    if (sessionData.errcode) throw new Error(sessionData.errmsg);
-
-    // 获取 access_token
     const tokenUrl = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${appId}&secret=${appSecret}`;
     const tokenData = await new Promise((resolve, reject) => {
       https.get(tokenUrl, (resp) => {
@@ -173,14 +194,12 @@ app.post("/api/wechat-cs/send-by-code", async (req, res) => {
         resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
       }).on("error", reject);
     });
-
     if (tokenData.errcode) throw new Error(tokenData.errmsg);
 
-    // 发送客服消息（用普通 access_token，非云托管链路）
     const sendUrl = `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${tokenData.access_token}`;
     const finalLink = linkUrl || "https://www.baidu.com";
     const content = `点击下方链接即可在浏览器中打开：\n\n${finalLink}`;
-    const payload = JSON.stringify({ touser: sessionData.openid, msgtype: "text", text: { content } });
+    const payload = JSON.stringify({ touser: openId, msgtype: "text", text: { content } });
 
     const sendOk = await new Promise((resolve) => {
       const parsed = new URL(sendUrl);
@@ -193,10 +212,7 @@ app.post("/api/wechat-cs/send-by-code", async (req, res) => {
         let d = "";
         resp.on("data", (c) => (d += c));
         resp.on("end", () => {
-          try {
-            const r = JSON.parse(d);
-            resolve(!r.errcode || r.errcode === 0);
-          } catch { resolve(false); }
+          try { resolve(!JSON.parse(d).errcode); } catch { resolve(false); }
         });
       });
       req2.on("error", () => resolve(false));
@@ -204,7 +220,7 @@ app.post("/api/wechat-cs/send-by-code", async (req, res) => {
       req2.end();
     });
 
-    if (sendOk) return res.send({ code: 200, msg: "消息已发送", data: { openid: sessionData.openid } });
+    if (sendOk) return res.send({ code: 200, msg: "消息已发送", data: { openId } });
     return res.send({ code: 500, msg: "消息发送失败", data: null });
   } catch (err) {
     console.error("[CS] sendByCode 异常:", err.message);
