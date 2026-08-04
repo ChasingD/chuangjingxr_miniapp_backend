@@ -22,7 +22,11 @@
 		"PolicyThreshold": 80
 	}
   ],
-  "envParams": {},
+  "envParams": {
+    "WECHAT_APPID": "wxebd10c3dc6a0dc75",
+    "WECHAT_APPSECRET": "21f40fc0f6a2f0e215acb3ad42bb0b91",
+    "WECHAT_CS_TOKEN": "chuangjingxr_cs_token_2026"
+  },
   "customLogs": "stdout",
   "initialDelaySeconds": 2,
   "dataBaseName": "nodejs_demo",
