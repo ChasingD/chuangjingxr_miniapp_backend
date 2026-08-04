@@ -2,9 +2,10 @@ import { Module } from '@nestjs/common';
 import { AppController } from '@/app.controller';
 import { AppService } from '@/app.service';
 import { WechatCsModule } from '@/wechat-cs/wechat-cs.module';
+import { PayModule } from '@/pay/pay.module';
 
 @Module({
-  imports: [WechatCsModule],
+  imports: [WechatCsModule, PayModule],
   controllers: [AppController],
   providers: [AppService],
 })
