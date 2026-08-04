@@ -3,47 +3,52 @@ const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
 const https = require("https");
-const crypto = require("crypto");
 const { init: initDB, Counter } = require("./db");
 
-// 加载 .env（本地开发用），云托管通过平台注入环境变量，dotenv 失败不影响运行
+// 加载 .env（本地开发用），云托管通过平台注入环境变量
 try { require("dotenv").config(); } catch (_) {}
 
 const logger = morgan("tiny");
 
 const app = express();
-// 客服消息回调是 XML，不能用 json parser，用 raw body
-app.use(express.text({ type: "text/xml" }));
-app.use(express.raw({ type: "application/xml" }));
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 app.use(cors());
 app.use(logger);
 
-// ==================== 微信客服消息服务 ====================
+// ==================== 微信云托管客服消息服务 ====================
 
-const WECHAT_APPID = process.env.WECHAT_APPID || "";
-const WECHAT_APPSECRET = process.env.WECHAT_APPSECRET || "";
-const WECHAT_CS_TOKEN = process.env.WECHAT_CS_TOKEN || "";
-
-let accessToken = null;
-let tokenExpireTime = 0;
-
-/** https GET → JSON */
-function httpsGetJSON(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
-      let body = "";
-      res.on("data", (chunk) => (body += chunk));
-      res.on("end", () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
-    }).on("error", reject);
-  });
+/** 根据 sessionFrom 构建外链 */
+function buildLink(sessionFromStr) {
+  let action = "experience";
+  let sceneId = "1";
+  let title = "";
+  let xrType = "";
+  try {
+    if (sessionFromStr) {
+      const parsed = JSON.parse(sessionFromStr);
+      action = parsed.action || action;
+      sceneId = parsed.sceneId || sceneId;
+      title = parsed.title || "";
+      xrType = parsed.xrType || "";
+    }
+  } catch (_) { /* ignore */ }
+  const baseUrl = action === "createSame"
+    ? "https://www.bing.com"
+    : "https://www.baidu.com";
+  return `${baseUrl}?sceneId=${sceneId}&title=${encodeURIComponent(title)}&xrType=${encodeURIComponent(xrType)}&action=${action}`;
 }
 
-/** https POST → JSON */
-function httpsPostJSON(url, data) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify(data);
+/**
+ * 发送客服文本消息（含外链）
+ * 使用云托管免鉴权 cloudbase_access_token，无需自己维护 access_token
+ */
+async function sendLinkMessage(openId, linkUrl, cloudbaseToken) {
+  const url = `https://api.weixin.qq.com/cgi-bin/message/custom/send?cloudbase_access_token=${cloudbaseToken}`;
+  const content = `点击下方链接即可在浏览器中打开：\n\n${linkUrl}`;
+  const body = JSON.stringify({ touser: openId, msgtype: "text", text: { content } });
+
+  return new Promise((resolve) => {
     const parsed = new URL(url);
     const req = https.request({
       hostname: parsed.hostname,
@@ -51,77 +56,31 @@ function httpsPostJSON(url, data) {
       method: "POST",
       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
     }, (res) => {
-      let resp = "";
-      res.on("data", (chunk) => (resp += chunk));
-      res.on("end", () => { try { resolve(JSON.parse(resp)); } catch (e) { reject(e); } });
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          const result = JSON.parse(data);
+          if (result.errcode && result.errcode !== 0) {
+            console.error("[CS] 发送失败:", data);
+            resolve(false);
+          } else {
+            console.log(`[CS] 消息已发送给 ${openId}，链接: ${linkUrl}`);
+            resolve(true);
+          }
+        } catch (e) {
+          console.error("[CS] 解析响应失败:", e.message);
+          resolve(false);
+        }
+      });
     });
-    req.on("error", reject);
+    req.on("error", (err) => {
+      console.error("[CS] 请求失败:", err.message);
+      resolve(false);
+    });
     req.write(body);
     req.end();
   });
-}
-
-/** 获取微信 access_token */
-async function getAccessToken() {
-  if (accessToken && Date.now() < tokenExpireTime) return accessToken;
-  if (!WECHAT_APPID || !WECHAT_APPSECRET) throw new Error("微信配置不完整");
-  const url = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${WECHAT_APPID}&secret=${WECHAT_APPSECRET}`;
-  const data = await httpsGetJSON(url);
-  if (data.errcode) throw new Error(`获取 access_token 失败: ${data.errmsg}`);
-  accessToken = data.access_token;
-  tokenExpireTime = Date.now() + (data.expires_in - 300) * 1000;
-  console.log("[CS] access_token 获取成功");
-  return accessToken;
-}
-
-/** 通过 login code 换取 openid */
-async function code2Session(code) {
-  const url = `https://api.weixin.qq.com/sns/jscode2session?appid=${WECHAT_APPID}&secret=${WECHAT_APPSECRET}&js_code=${code}&grant_type=authorization_code`;
-  const data = await httpsGetJSON(url);
-  if (data.errcode) throw new Error(`code2session 失败: ${data.errmsg}`);
-  console.log(`[CS] code2session 成功 openid=${data.openid}`);
-  return { openid: data.openid };
-}
-
-/** 发送客服文本消息（含外链） */
-async function sendLinkMessage(openId, linkUrl) {
-  const token = await getAccessToken();
-  const url = `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`;
-  const content = `点击下方链接即可在浏览器中打开：\n\n${linkUrl}`;
-  const data = await httpsPostJSON(url, { touser: openId, msgtype: "text", text: { content } });
-  if (data.errcode && data.errcode !== 0) {
-    console.error("[CS] 发送客服消息失败:", JSON.stringify(data));
-    return false;
-  }
-  console.log(`[CS] 消息已发送给 ${openId}，链接: ${linkUrl}`);
-  return true;
-}
-
-/** 解析 XML 中的 CDATA 或普通值 */
-function extractXmlValue(xml, tag) {
-  const m1 = xml.match(new RegExp(`<${tag}><!\\[CDATA\\[(.*?)\\]\\]></${tag}>`));
-  if (m1) return m1[1];
-  const m2 = xml.match(new RegExp(`<${tag}>(.*?)</${tag}>`));
-  return m2 ? m2[1] : "";
-}
-
-/** 根据 sessionFrom 中的 action 构建外链 */
-function buildLink(sessionFromStr) {
-  let action = "experience";
-  let sceneId = "1";
-  let title = "";
-  let xrType = "";
-  try {
-    const parsed = JSON.parse(sessionFromStr);
-    action = parsed.action || action;
-    sceneId = parsed.sceneId || sceneId;
-    title = parsed.title || "";
-    xrType = parsed.xrType || "";
-  } catch (_) { /* ignore parse error */ }
-  const baseUrl = action === "createSame"
-    ? "https://www.bing.com"
-    : "https://www.baidu.com";
-  return `${baseUrl}?sceneId=${sceneId}&title=${encodeURIComponent(title)}&xrType=${encodeURIComponent(xrType)}&action=${action}`;
 }
 
 // ==================== 路由 ====================
@@ -146,7 +105,7 @@ app.get("/api/count", async (req, res) => {
   res.send({ code: 0, data: await Counter.count() });
 });
 
-// 小程序调用，获取微信 Open ID
+// 获取 OpenID
 app.get("/api/wx_openid", async (req, res) => {
   if (req.headers["x-wx-source"]) {
     res.send(req.headers["x-wx-openid"]);
@@ -154,72 +113,114 @@ app.get("/api/wx_openid", async (req, res) => {
 });
 
 /**
- * WeChat 服务器 URL 校验（GET 请求，用于首次配置）
- * GET /api/wechat-cs?signature=...&timestamp=...&nonce=...&echostr=...
- */
-app.get("/api/wechat-cs", (req, res) => {
-  const { signature, timestamp, nonce, echostr } = req.query;
-  console.log(`[CS] URL 校验: signature=${signature}, timestamp=${timestamp}`);
-
-  if (!WECHAT_CS_TOKEN) {
-    console.warn("[CS] WECHAT_CS_TOKEN 未配置，URL 校验失败");
-    return res.status(403).send("Forbidden: token not configured");
-  }
-
-  const arr = [WECHAT_CS_TOKEN, timestamp, nonce].sort();
-  const sha1 = crypto.createHash("sha1").update(arr.join("")).digest("hex");
-  if (sha1 === signature) {
-    console.log("[CS] URL 校验通过");
-    return res.send(echostr);
-  }
-  console.warn("[CS] URL 校验失败：签名不匹配");
-  res.status(403).send("Forbidden: signature mismatch");
-});
-
-/**
- * WeChat 客服消息回调（POST 请求）
- * 用户进入客服会话或发送消息时，微信服务器推送 XML 到这里
+ * 云托管消息推送回调
  * POST /api/wechat-cs
+ *
+ * 云托管消息推送为 JSON 模式、内网免鉴权。
+ * 用户进入客服会话时，微信推送 user_enter_tempsession 事件，
+ * 请求头自动携带 x-wx-cloudbase-access-token（免鉴权调用微信 API 用）
+ * 和 x-wx-openid（当前用户 OpenID）。
  */
 app.post("/api/wechat-cs", async (req, res) => {
-  const xml = typeof req.body === "string" ? req.body : req.body?.toString() || "";
-  console.log(`[CS] 收到回调: ${xml.substring(0, 300)}`);
+  const body = req.body || {};
+  console.log("[CS] 收到推送:", JSON.stringify(body).substring(0, 500));
 
-  const fromUserName = extractXmlValue(xml, "FromUserName");
-  const msgType = extractXmlValue(xml, "MsgType");
-  const event = extractXmlValue(xml, "Event");
-  const sessionFrom = extractXmlValue(xml, "SessionFrom");
-
-  console.log(`[CS] 解析: from=${fromUserName}, msgType=${msgType}, event=${event}, sessionFrom=${sessionFrom}`);
-
-  // 用户进入客服会话时，微信会推送 user_enter_tempsession 事件，携带 SessionFrom
-  // 此时根据 sessionFrom 构建外链并下发到会话
-  if (fromUserName && sessionFrom) {
-    const link = buildLink(sessionFrom);
-    sendLinkMessage(fromUserName, link)
-      .then(ok => console.log(`[CS] 自动下发${ok ? "成功" : "失败"}: ${link}`))
-      .catch(err => console.error(`[CS] 自动下发异常:`, err.message));
+  // 云托管配置检测：返回 "success" 即可
+  if (body.action === "CheckContainerPath") {
+    console.log("[CS] 配置检测通过");
+    return res.send("success");
   }
 
-  // 返回 SUCCESS 给微信服务器
-  res.set("Content-Type", "application/xml");
-  res.send("<xml><return_code><![CDATA[SUCCESS]]></return_code><return_msg><![CDATA[OK]]></return_msg></xml>");
+  // 从请求头获取云托管免鉴权信息
+  const cloudbaseToken = req.headers["x-wx-cloudbase-access-token"] || "";
+  const openId = body.FromUserName
+    || req.headers["x-wx-openid"]
+    || "";
+
+  // 从事件数据中提取 sessionFrom（按钮透传的 JSON）
+  const sessionFrom = body.SessionFrom || body.sessionFrom || "";
+
+  console.log(`[CS] openId=${openId}, sessionFrom=${sessionFrom}, hasToken=${!!cloudbaseToken}`);
+
+  if (openId && sessionFrom && cloudbaseToken) {
+    const link = buildLink(sessionFrom);
+    sendLinkMessage(openId, link, cloudbaseToken)
+      .then(ok => console.log(`[CS] 下发${ok ? "成功" : "失败"}: ${link}`))
+      .catch(err => console.error(`[CS] 下发异常:`, err.message));
+  } else {
+    console.warn("[CS] 缺少必要参数，跳过下发");
+  }
+
+  // 必须返回 "success"
+  res.send("success");
 });
 
 /**
- * 通过小程序 login code 发送客服消息（前端调用的主动下发接口）
+ * 通过小程序 login code 发送客服消息（备用主动下发接口）
  * POST /api/wechat-cs/send-by-code
- * Body: { code: string, linkUrl: string }
  */
 app.post("/api/wechat-cs/send-by-code", async (req, res) => {
   const { code, linkUrl } = req.body || {};
+  const appId = process.env.WECHAT_APPID || "";
+  const appSecret = process.env.WECHAT_APPSECRET || "";
+
   if (!code) return res.send({ code: 400, msg: "缺少 code 参数", data: null });
+  if (!appId || !appSecret) return res.send({ code: 500, msg: "WECHAT_APPID/APPSECRET 未配置", data: null });
 
   try {
-    const session = await code2Session(code);
+    // code2session
+    const sessionUrl = `https://api.weixin.qq.com/sns/jscode2session?appid=${appId}&secret=${appSecret}&js_code=${code}&grant_type=authorization_code`;
+    const sessionData = await new Promise((resolve, reject) => {
+      https.get(sessionUrl, (resp) => {
+        let d = "";
+        resp.on("data", (c) => (d += c));
+        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+      }).on("error", reject);
+    });
+
+    if (sessionData.errcode) throw new Error(sessionData.errmsg);
+
+    // 获取 access_token
+    const tokenUrl = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${appId}&secret=${appSecret}`;
+    const tokenData = await new Promise((resolve, reject) => {
+      https.get(tokenUrl, (resp) => {
+        let d = "";
+        resp.on("data", (c) => (d += c));
+        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+      }).on("error", reject);
+    });
+
+    if (tokenData.errcode) throw new Error(tokenData.errmsg);
+
+    // 发送客服消息（用普通 access_token，非云托管链路）
+    const sendUrl = `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${tokenData.access_token}`;
     const finalLink = linkUrl || "https://www.baidu.com";
-    const success = await sendLinkMessage(session.openid, finalLink);
-    if (success) return res.send({ code: 200, msg: "消息已发送", data: { openid: session.openid } });
+    const content = `点击下方链接即可在浏览器中打开：\n\n${finalLink}`;
+    const payload = JSON.stringify({ touser: sessionData.openid, msgtype: "text", text: { content } });
+
+    const sendOk = await new Promise((resolve) => {
+      const parsed = new URL(sendUrl);
+      const req2 = https.request({
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      }, (resp) => {
+        let d = "";
+        resp.on("data", (c) => (d += c));
+        resp.on("end", () => {
+          try {
+            const r = JSON.parse(d);
+            resolve(!r.errcode || r.errcode === 0);
+          } catch { resolve(false); }
+        });
+      });
+      req2.on("error", () => resolve(false));
+      req2.write(payload);
+      req2.end();
+    });
+
+    if (sendOk) return res.send({ code: 200, msg: "消息已发送", data: { openid: sessionData.openid } });
     return res.send({ code: 500, msg: "消息发送失败", data: null });
   } catch (err) {
     console.error("[CS] sendByCode 异常:", err.message);
@@ -227,17 +228,13 @@ app.post("/api/wechat-cs/send-by-code", async (req, res) => {
   }
 });
 
-/**
- * 获取配置状态（调试用）
- * GET /api/wechat-cs/config-status
- */
+/** 获取配置状态 */
 app.get("/api/wechat-cs/config-status", (req, res) => {
   res.send({
     code: 200, msg: "ok",
     data: {
-      appIdConfigured: !!WECHAT_APPID,
-      appSecretConfigured: !!WECHAT_APPSECRET,
-      tokenConfigured: !!WECHAT_CS_TOKEN,
+      appIdConfigured: !!process.env.WECHAT_APPID,
+      appSecretConfigured: !!process.env.WECHAT_APPSECRET,
     },
   });
 });
@@ -248,9 +245,8 @@ async function bootstrap() {
   await initDB();
   app.listen(port, () => {
     console.log("启动成功，端口:", port);
-    console.log("微信客服回调: POST /api/wechat-cs");
-    console.log("微信客服主动下发: POST /api/wechat-cs/send-by-code");
-    console.log("配置:", { appId: !!WECHAT_APPID, appSecret: !!WECHAT_APPSECRET, token: !!WECHAT_CS_TOKEN });
+    console.log("云托管消息推送: POST /api/wechat-cs (JSON 模式)");
+    console.log("备用接口: POST /api/wechat-cs/send-by-code");
   });
 }
 
