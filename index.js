@@ -8,6 +8,10 @@ const { init: initDB, Counter } = require("./db");
 // 加载 .env（本地开发用），云托管通过平台注入环境变量
 try { require("dotenv").config(); } catch (_) {}
 
+// ═══ BUILD MARKER v2026.08.04-1505 ═══
+// 如果线上日志没有这一行，说明云托管构建缓存没刷新
+console.log("[INIT] index.js loaded — build marker v2026.08.04-1505");
+
 const logger = morgan("tiny");
 
 const app = express();
