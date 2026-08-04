@@ -41,10 +41,10 @@ function buildLink(sessionFromStr) {
 
 /**
  * 发送客服文本消息（含外链）
- * 使用云托管免鉴权 cloudbase_access_token，无需自己维护 access_token
+ * token 可以是普通 access_token 或 cloudbase_access_token
  */
-async function sendLinkMessage(openId, linkUrl, cloudbaseToken) {
-  const url = `https://api.weixin.qq.com/cgi-bin/message/custom/send?cloudbase_access_token=${cloudbaseToken}`;
+async function sendLinkMessage(openId, linkUrl, token) {
+  const url = `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`;
   const content = `点击下方链接即可在浏览器中打开：\n\n${linkUrl}`;
   const body = JSON.stringify({ touser: openId, msgtype: "text", text: { content } });
 
@@ -131,24 +131,41 @@ app.post("/api/wechat-cs", async (req, res) => {
     return res.send("success");
   }
 
-  // 从请求头获取云托管免鉴权信息
-  const cloudbaseToken = req.headers["x-wx-cloudbase-access-token"] || "";
-  const openId = body.FromUserName
-    || req.headers["x-wx-openid"]
-    || "";
+  // 从事件中提取 OpenID（用户在微信体系内的唯一标识）
+  const openId = body.FromUserName || "";
 
-  // 从事件数据中提取 sessionFrom（按钮透传的 JSON）
+  // sessionFrom 可能存在也可能为空（取决于前端 Taro 编译是否正常透传）
   const sessionFrom = body.SessionFrom || body.sessionFrom || "";
 
-  console.log(`[CS] openId=${openId}, sessionFrom=${sessionFrom}, hasToken=${!!cloudbaseToken}`);
+  console.log(`[CS] openId=${openId}, sessionFrom=${sessionFrom || "(空)"}`);
 
-  if (openId && sessionFrom && cloudbaseToken) {
-    const link = buildLink(sessionFrom);
-    sendLinkMessage(openId, link, cloudbaseToken)
-      .then(ok => console.log(`[CS] 下发${ok ? "成功" : "失败"}: ${link}`))
-      .catch(err => console.error(`[CS] 下发异常:`, err.message));
+  if (openId) {
+    const appId = process.env.WECHAT_APPID || "";
+    const appSecret = process.env.WECHAT_APPSECRET || "";
+
+    if (appId && appSecret) {
+      try {
+        // 获取 access_token
+        const tokenUrl = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${appId}&secret=${appSecret}`;
+        const tokenData = await new Promise((resolve, reject) => {
+          https.get(tokenUrl, (resp) => {
+            let d = "";
+            resp.on("data", (c) => (d += c));
+            resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+          }).on("error", reject);
+        });
+        if (tokenData.errcode) throw new Error(tokenData.errmsg);
+
+        const link = sessionFrom ? buildLink(sessionFrom) : "https://www.baidu.com";
+        await sendLinkMessage(openId, link, tokenData.access_token);
+      } catch (err) {
+        console.error(`[CS] 下发失败:`, err.message);
+      }
+    } else {
+      console.warn("[CS] WECHAT_APPID/APPSECRET 未配置，无法下发");
+    }
   } else {
-    console.warn("[CS] 缺少必要参数，跳过下发");
+    console.warn("[CS] 缺少 OpenID，跳过下发");
   }
 
   // 必须返回 "success"
