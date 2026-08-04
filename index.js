@@ -157,8 +157,6 @@ app.post("/api/wechat-cs/send-by-code", async (req, res) => {
 
   const appId = process.env.WECHAT_APPID || "";
   const appSecret = process.env.WECHAT_APPSECRET || "";
-  const appId = process.env.WECHAT_APPID || "";
-  const appSecret = process.env.WECHAT_APPSECRET || "";
 
   if (!openId) {
     // callContainer 没带 openid → 走传统 code2session（需要 appid/secret）
