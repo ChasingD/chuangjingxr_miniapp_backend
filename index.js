@@ -192,14 +192,13 @@ app.post("/api/wechat-cs", async (req, res) => {
 
   console.log(`[CS] 解析: from=${fromUserName}, msgType=${msgType}, event=${event}, sessionFrom=${sessionFrom}`);
 
-  if (fromUserName) {
-    // 用户进入会话事件 (user_enter_tempsession) 或发送消息时，自动下发链接
-    if (msgType === "event" || (msgType === "text" && !sessionFrom)) {
-      const link = buildLink(sessionFrom);
-      this.sendLinkMessage(fromUserName, link)
-        .then(ok => console.log(`[CS] 自动下发${ok ? "成功" : "失败"}: ${link}`))
-        .catch(err => console.error(`[CS] 自动下发异常:`, err.message));
-    }
+  // 用户进入客服会话时，微信会推送 user_enter_tempsession 事件，携带 SessionFrom
+  // 此时根据 sessionFrom 构建外链并下发到会话
+  if (fromUserName && sessionFrom) {
+    const link = buildLink(sessionFrom);
+    sendLinkMessage(fromUserName, link)
+      .then(ok => console.log(`[CS] 自动下发${ok ? "成功" : "失败"}: ${link}`))
+      .catch(err => console.error(`[CS] 自动下发异常:`, err.message));
   }
 
   // 返回 SUCCESS 给微信服务器
