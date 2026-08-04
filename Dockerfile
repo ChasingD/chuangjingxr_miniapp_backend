@@ -2,7 +2,7 @@
 FROM alpine:3.13
 
 # ═══ 改代码后修改此行强制破 Docker 缓存 ═══
-ARG CACHEBUST=202608041530
+ARG CACHEBUST=202608041610
 
 # 容器默认时区为UTC，如需使用上海时间请启用以下时区设置命令
 # RUN apk add tzdata && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo Asia/Shanghai > /etc/timezone
