@@ -131,42 +131,9 @@ app.post("/api/wechat-cs", async (req, res) => {
     return res.send("success");
   }
 
-  // 从事件中提取 OpenID（用户在微信体系内的唯一标识）
-  const openId = body.FromUserName || "";
-
-  // sessionFrom 可能存在也可能为空（取决于前端 Taro 编译是否正常透传）
-  const sessionFrom = body.SessionFrom || body.sessionFrom || "";
-
-  console.log(`[CS] openId=${openId}, sessionFrom=${sessionFrom || "(空)"}`);
-
-  if (openId) {
-    const appId = process.env.WECHAT_APPID || "";
-    const appSecret = process.env.WECHAT_APPSECRET || "";
-
-    if (appId && appSecret) {
-      try {
-        // 获取 access_token
-        const tokenUrl = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${appId}&secret=${appSecret}`;
-        const tokenData = await new Promise((resolve, reject) => {
-          https.get(tokenUrl, (resp) => {
-            let d = "";
-            resp.on("data", (c) => (d += c));
-            resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
-          }).on("error", reject);
-        });
-        if (tokenData.errcode) throw new Error(tokenData.errmsg);
-
-        const link = sessionFrom ? buildLink(sessionFrom) : "https://www.baidu.com";
-        await sendLinkMessage(openId, link, tokenData.access_token);
-      } catch (err) {
-        console.error(`[CS] 下发失败:`, err.message);
-      }
-    } else {
-      console.warn("[CS] WECHAT_APPID/APPSECRET 未配置，无法下发");
-    }
-  } else {
-    console.warn("[CS] 缺少 OpenID，跳过下发");
-  }
+  // 消息推送仅用于云托管配置检测，不再自动下发链接
+  // 外链下发由 onClick → send-by-code 负责，避免重复消息
+  console.log(`[CS] 收到推送: event=${body.Event}`);
 
   // 必须返回 "success"
   res.send("success");
