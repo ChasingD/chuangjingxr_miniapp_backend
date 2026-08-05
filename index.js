@@ -346,6 +346,25 @@ app.get("/api/wechat-cs/config-status", (req, res) => {
 
 // ==================== 用户信息 ====================
 
+/**
+ * phoneCode → 真实手机号
+ * POST /api/wechat/exchange-phone
+ * Body: { phoneCode } → { phoneNumber }
+ */
+app.post("/api/wechat/exchange-phone", async (req, res) => {
+  const { phoneCode } = req.body || {};
+  if (!phoneCode) return res.send({ code: 400, msg: "缺少 phoneCode", data: null });
+
+  try {
+    const phoneNumber = await getPhoneNumber(phoneCode);
+    console.log("[PHONE] 兑换成功:", (phoneNumber || "").substring(0, 3) + "****");
+    res.send({ code: 200, msg: "ok", data: { phoneNumber } });
+  } catch (err) {
+    console.error("[PHONE] 兑换失败:", err.message);
+    res.send({ code: 500, msg: "获取手机号失败", data: null });
+  }
+});
+
 /** 获取当前用户信息（需登录） */
 app.get("/api/user/info", authMiddleware, async (req, res) => {
   try {
