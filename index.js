@@ -266,6 +266,42 @@ function buildPrepaySign(prepayId) {
   return { prepayId, nonceStr, timeStamp, signType: "RSA", sign };
 }
 
+/**
+ * 主动查单 — 调微信查单 API（GET /v3/pay/transactions/out-trade-no/{outTradeNo}）
+ * 用于不开公网回调的场景，以查单代替被动通知
+ */
+async function queryWechatOrder(outTradeNo) {
+  const urlPath = "/v3/pay/transactions/out-trade-no/" + outTradeNo + "?mchid=" + PAY_MCHID;
+  const body = "";
+  const authHeader = buildAuthorization("GET", urlPath, body);
+  const parsed = new URL("https://api.mch.weixin.qq.com" + urlPath);
+
+  return new Promise((resolve, reject) => {
+    https.get({
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      headers: { "Accept": "application/json", "Authorization": authHeader, "User-Agent": "chuangjingxr/1.0" },
+    }, (resp) => {
+      let d = "";
+      resp.on("data", (c) => (d += c));
+      resp.on("end", () => {
+        try {
+          const data = JSON.parse(d);
+          if (data.trade_state === "SUCCESS") {
+            resolve({ paid: true, transactionId: data.transaction_id || "", tradeState: "SUCCESS" });
+          } else if (data.code) {
+            // API 错误（订单不存在等）
+            reject(new Error(data.message || "查单失败"));
+          } else {
+            // 未支付
+            resolve({ paid: false, transactionId: "", tradeState: data.trade_state || "UNKNOWN" });
+          }
+        } catch (e) { reject(e); }
+      });
+    }).on("error", reject);
+  });
+}
+
 // ========== 支付路由 ==========
 
 /**
@@ -296,7 +332,7 @@ app.post("/api/pay/order", async (req, res) => {
       mchid: PAY_MCHID,
       description: description,
       out_trade_no: orderId,
-      notify_url: PAY_NOTIFY_URL,
+      notify_url: PAY_NOTIFY_URL || "https://noop.placeholder/pay/notify", // 不开公网则占位，以查单为主
       amount: { total: amount, currency: "CNY" },
       payer: { openid: openid },
     });
@@ -391,12 +427,33 @@ app.post("/api/pay/notify", async (req, res) => {
 });
 
 /**
- * 查询订单状态
+ * 查询订单状态（不开公网时以此代回调）
  * GET /api/pay/order/:id
+ * pending 订单会主动调微信查单 API 确认支付状态
  */
 app.get("/api/pay/order/:id", async (req, res) => {
   const order = await Order.findByPk(req.params.id);
   if (!order) return res.send({ code: 404, msg: "订单不存在", data: null });
+
+  // pending 订单 → 主动查微信确认是否已支付
+  if (order.status === "pending") {
+    try {
+      const wxResult = await queryWechatOrder(order.id);
+      if (wxResult.paid) {
+        await Order.update(
+          { status: "paid", transactionId: wxResult.transactionId, paidAt: new Date() },
+          { where: { id: order.id } }
+        );
+        order.status = "paid";
+        order.transactionId = wxResult.transactionId;
+        console.log("[PAY] 查单确认已支付:", order.id, wxResult.transactionId);
+      }
+    } catch (e) {
+      // 查单失败不影响返回，仍返回当前订单状态
+      console.warn("[PAY] 查单失败:", e.message);
+    }
+  }
+
   res.send({ code: 200, msg: "ok", data: order });
 });
 
