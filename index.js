@@ -161,17 +161,17 @@ function authMiddleware(req, res, next) {
  * 登录/注册
  * POST /api/xrAppletMobileLogin
  *
- * Body: { deviceKey, code, phoneCode, avatar?, nickname?, password? }
- * - 后端用 code → openid, phoneCode → 真实手机号
+ * Body: { deviceKey, code, phonenumber, avatar?, nickname?, password? }
+ * - 后端用 code → openid, phonenumber → 真实手机号
  * - 不传 password → 检测是否已注册：已注册返 { registered:true, token }；未注册返 { registered:false }
  * - 传 password → 注册新用户并登录
  */
 app.post("/api/xrAppletMobileLogin", async (req, res) => {
   try {
-    const { code, phoneCode, avatar, nickname, password } = req.body || {};
+    const { code, phonenumber, avatar, nickname, password } = req.body || {};
 
     if (!code) return res.send({ code: 400, msg: "缺少登录凭证 code", data: null });
-    if (!phoneCode) return res.send({ code: 400, msg: "缺少手机号凭证 phoneCode", data: null });
+    if (!phonenumber) return res.send({ code: 400, msg: "缺少手机号 phonenumber", data: null });
 
     // 1. code → openid
     const wxData = await jscode2session(code);
@@ -179,10 +179,10 @@ app.post("/api/xrAppletMobileLogin", async (req, res) => {
     if (errcode) return res.send({ code: 500, msg: `微信登录失败: ${errmsg}`, data: null });
     console.log("[LOGIN] jscode2session 成功, openid:", (openid || "").substring(0, 10) + "...");
 
-    // 2. phoneCode → 真实手机号
+    // 2. phonenumber(phoneCode) → 真实手机号
     let phone = null;
     try {
-      phone = await getPhoneNumber(phoneCode);
+      phone = await getPhoneNumber(phonenumber);
       console.log("[LOGIN] 手机号获取成功:", (phone || "").substring(0, 3) + "****");
     } catch (e) {
       console.warn("[LOGIN] 获取手机号失败:", e.message);
