@@ -1,9 +1,17 @@
 const { Sequelize, DataTypes } = require("sequelize");
 
-// 从环境变量中读取数据库配置
-const { MYSQL_USERNAME, MYSQL_PASSWORD, MYSQL_ADDRESS = "" } = process.env;
+// 从环境变量中读取数据库配置（云托管自动注入，本地开发在 .env 中配置）
+const { MYSQL_USERNAME = "", MYSQL_PASSWORD = "", MYSQL_ADDRESS = "" } = process.env;
 
-const [host, port] = MYSQL_ADDRESS.split(":");
+if (!MYSQL_ADDRESS || !MYSQL_USERNAME) {
+  console.error("[DB] MYSQL_ADDRESS/MYSQL_USERNAME 未配置！");
+  console.error("[DB] 云托管：请在控制台关联 MySQL 数据库");
+  console.error("[DB] 本地开发：在 .env 中配置 MYSQL_ADDRESS=host:port");
+}
+
+const [host, port = "3306"] = MYSQL_ADDRESS.split(":");
+
+console.log(`[DB] 连接 MySQL: ${MYSQL_USERNAME}@${host}:${port}`);
 
 const sequelize = new Sequelize("nodejs_demo", MYSQL_USERNAME, MYSQL_PASSWORD, {
   host,
