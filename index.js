@@ -417,13 +417,15 @@ function loadPublicKey() {
 // 价目表（后端定价）
 const PRODUCT_PRICES = {
   vip_count: { "vip-1": 1000, "vip-10": 8000, "vip-30": 18000 },
-  vip_duration: { "vip-monthly": 9800, monthly: 0, yearly: 0 },
+  vip_regular: { monthly: 1000, yearly: 9800 },
+  vip_duration: { "vip-monthly": 9800, "vip-quarterly": 27000 },
   scene_purchase: { "scene-2": 699, "scene-7": 699 },
 };
 
 const PRODUCT_NAMES = {
   vip_count: { "vip-1": "单次VIP权益体验包", "vip-10": "10次VIP权益优惠包", "vip-30": "30次VIP权益超值包" },
-  vip_duration: { "vip-monthly": "连续包月VIP会员", monthly: "连续包月", yearly: "连续包年" },
+  vip_regular: { monthly: "连续包月", yearly: "连续包年" },
+  vip_duration: { "vip-monthly": "连续包月VIP会员", "vip-quarterly": "连续包季VIP会员" },
   scene_purchase: { "scene-2": "场景体验", "scene-7": "场景体验" },
 };
 
