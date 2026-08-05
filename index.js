@@ -388,16 +388,46 @@ const PAY_NOTIFY_URL = process.env.WECHAT_PAY_NOTIFY_URL || "";
 let _privateKey = null;
 let _publicKey = null;
 
+/**
+ * 归一化从环境变量读取的 PEM 密钥内容，兼容多种云托管录入方式：
+ * - 录入时用 \n 替换换行 → replace 恢复
+ * - 录入时粘贴多行（含真实换行）→ 直接用
+ * - 录入时粘贴但平台删掉所有换行 → 按 PEM 标记重新插入换行
+ */
+function normalizePem(raw) {
+  let s = raw.trim();
+  // 已有真实换行 → 直接用
+  if (s.includes("\n")) return s;
+  // 含 \n 转义 → 替换为真实换行
+  s = s.replace(/\\n/g, "\n");
+  if (s.includes("\n")) return s;
+  // 所有换行都被平台删掉了，按 PEM header/footer 重新格式化
+  const headerMatch = s.match(/-----BEGIN [A-Z ]+-----/);
+  const footerMatch = s.match(/-----END [A-Z ]+-----/);
+  if (headerMatch && footerMatch) {
+    const header = headerMatch[0];
+    const footer = footerMatch[0];
+    const body = s.slice(s.indexOf(header) + header.length, s.indexOf(footer));
+    // 每 64 字符换行
+    const lines = body.match(/.{1,64}/g) || [];
+    return header + "\n" + lines.join("\n") + "\n" + footer + "\n";
+  }
+  // 无法识别，原样返回（后面 crypto 会报具体错误）
+  return s;
+}
+
 function loadPrivateKey() {
   if (_privateKey) return _privateKey;
   const fromEnv = process.env.WECHAT_PAY_PRIVATE_KEY || "";
   if (fromEnv) {
-    _privateKey = fromEnv.replace(/\\n/g, "\n"); // 环境变量中 \n 被转义
+    _privateKey = normalizePem(fromEnv);
+    console.log("[PAY] 私钥来源: env, 长度:", _privateKey.length, "开头:", _privateKey.substring(0, 40));
     return _privateKey;
   }
   const keyPath = process.env.WECHAT_PAY_PRIVATE_KEY_PATH || "./certs/apiclient_key.pem";
   if (!fs.existsSync(keyPath)) throw new Error("私钥未找到: " + keyPath + " — 请设置 WECHAT_PAY_PRIVATE_KEY 环境变量或确保文件存在");
   _privateKey = fs.readFileSync(keyPath, "utf8");
+  console.log("[PAY] 私钥来源: file", keyPath, "长度:", _privateKey.length);
   return _privateKey;
 }
 
@@ -405,12 +435,14 @@ function loadPublicKey() {
   if (_publicKey) return _publicKey;
   const fromEnv = process.env.WECHAT_PAY_PUBLIC_KEY || "";
   if (fromEnv) {
-    _publicKey = fromEnv.replace(/\\n/g, "\n");
+    _publicKey = normalizePem(fromEnv);
+    console.log("[PAY] 公钥来源: env, 长度:", _publicKey.length, "开头:", _publicKey.substring(0, 40));
     return _publicKey;
   }
   const keyPath = process.env.WECHAT_PAY_PUBLIC_KEY_PATH || "./certs/wechatpay_public.pem";
   if (!fs.existsSync(keyPath)) throw new Error("公钥未找到: " + keyPath + " — 请设置 WECHAT_PAY_PUBLIC_KEY 环境变量或确保文件存在");
   _publicKey = fs.readFileSync(keyPath, "utf8");
+  console.log("[PAY] 公钥来源: file", keyPath, "长度:", _publicKey.length);
   return _publicKey;
 }
 
