@@ -68,6 +68,7 @@ function sanitizeUser(user) {
     nickname: user.nickname,
     avatar: user.avatar,
     role: user.role,
+    createdAt: user.createdAt || null,
   };
 }
 
@@ -161,14 +162,14 @@ function authMiddleware(req, res, next) {
  * 登录/注册
  * POST /api/xrAppletMobileLogin
  *
- * Body: { deviceKey, code, phonenumber, avatar?, nickname?, password? }
+ * Body: { deviceKey, code, phonenumber, avatar?, nickName?, password? }
  * - 后端用 code → openid, phonenumber → 真实手机号
  * - 不传 password → 检测是否已注册：已注册返 { registered:true, token }；未注册返 { registered:false }
  * - 传 password → 注册新用户并登录
  */
 app.post("/api/xrAppletMobileLogin", async (req, res) => {
   try {
-    const { code, phonenumber, avatar, nickname, password } = req.body || {};
+    const { code, phonenumber, avatar, nickName, password } = req.body || {};
 
     if (!code) return res.send({ code: 400, msg: "缺少登录凭证 code", data: null });
     if (!phonenumber) return res.send({ code: 400, msg: "缺少手机号 phonenumber", data: null });
@@ -211,7 +212,7 @@ app.post("/api/xrAppletMobileLogin", async (req, res) => {
         openid,
         phone: phone || null,
         password, // TODO: 生产环境应 bcrypt 哈希
-        nickname: nickname || "微信用户",
+        nickname: nickName || "微信用户",
         avatar: avatar || "",
       });
       isNew = true;
@@ -225,7 +226,7 @@ app.post("/api/xrAppletMobileLogin", async (req, res) => {
 
       // 头像/昵称首次或默认时更新
       if (avatar && (!user.avatar || user.avatar === "")) { user.avatar = avatar; updated = true; }
-      if (nickname && (user.nickname === "微信用户" || !user.nickname)) { user.nickname = nickname; updated = true; }
+      if (nickName && (user.nickname === "微信用户" || !user.nickname)) { user.nickname = nickName; updated = true; }
 
       // 如果传了 password → 设置/更新密码
       if (password) { user.password = password; updated = true; }
