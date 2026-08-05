@@ -166,9 +166,37 @@ app.get("/api/wechat-cs/config-status", (req, res) => {
 const PAY_MCHID = process.env.WECHAT_PAY_MCHID || "";
 const PAY_API_V3_KEY = process.env.WECHAT_PAY_API_V3_KEY || "";
 const PAY_SERIAL_NO = process.env.WECHAT_PAY_SERIAL_NO || "";
-const PAY_PRIVATE_KEY_PATH = process.env.WECHAT_PAY_PRIVATE_KEY_PATH || "";
-const PAY_PUBLIC_KEY_PATH = process.env.WECHAT_PAY_PUBLIC_KEY_PATH || "";
 const PAY_NOTIFY_URL = process.env.WECHAT_PAY_NOTIFY_URL || "";
+
+// 私钥/公钥：优先读环境变量内容（云托管），fallback 读文件（本地开发）
+let _privateKey = null;
+let _publicKey = null;
+
+function loadPrivateKey() {
+  if (_privateKey) return _privateKey;
+  const fromEnv = process.env.WECHAT_PAY_PRIVATE_KEY || "";
+  if (fromEnv) {
+    _privateKey = fromEnv.replace(/\\n/g, "\n"); // 环境变量中 \n 被转义
+    return _privateKey;
+  }
+  const keyPath = process.env.WECHAT_PAY_PRIVATE_KEY_PATH || "./certs/apiclient_key.pem";
+  if (!fs.existsSync(keyPath)) throw new Error("私钥未找到: " + keyPath + " — 请设置 WECHAT_PAY_PRIVATE_KEY 环境变量或确保文件存在");
+  _privateKey = fs.readFileSync(keyPath, "utf8");
+  return _privateKey;
+}
+
+function loadPublicKey() {
+  if (_publicKey) return _publicKey;
+  const fromEnv = process.env.WECHAT_PAY_PUBLIC_KEY || "";
+  if (fromEnv) {
+    _publicKey = fromEnv.replace(/\\n/g, "\n");
+    return _publicKey;
+  }
+  const keyPath = process.env.WECHAT_PAY_PUBLIC_KEY_PATH || "./certs/wechatpay_public.pem";
+  if (!fs.existsSync(keyPath)) throw new Error("公钥未找到: " + keyPath + " — 请设置 WECHAT_PAY_PUBLIC_KEY 环境变量或确保文件存在");
+  _publicKey = fs.readFileSync(keyPath, "utf8");
+  return _publicKey;
+}
 
 // 价目表（后端定价）
 const PRODUCT_PRICES = {
@@ -197,16 +225,6 @@ function getDescription(productType, productId) {
 }
 
 // ========== 签名 & 加解密 ==========
-
-function loadPrivateKey() {
-  if (!PAY_PRIVATE_KEY_PATH) throw new Error("WECHAT_PAY_PRIVATE_KEY_PATH 未配置");
-  return fs.readFileSync(PAY_PRIVATE_KEY_PATH, "utf8");
-}
-
-function loadPublicKey() {
-  if (!PAY_PUBLIC_KEY_PATH) throw new Error("WECHAT_PAY_PUBLIC_KEY_PATH 未配置");
-  return fs.readFileSync(PAY_PUBLIC_KEY_PATH, "utf8");
-}
 
 function signSHA256RSA(data, privateKey) {
   const sign = crypto.createSign("RSA-SHA256");
