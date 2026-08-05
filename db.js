@@ -35,10 +35,26 @@ const Order = sequelize.define("Order", {
   underscored: true,
 });
 
+// 用户模型
+const User = sequelize.define("User", {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  openid: { type: DataTypes.STRING(64), allowNull: true, unique: true },
+  phone: { type: DataTypes.STRING(20), allowNull: true, unique: true },
+  password: { type: DataTypes.STRING(128), allowNull: true },
+  nickname: { type: DataTypes.STRING(64), defaultValue: "微信用户" },
+  avatar: { type: DataTypes.STRING(512), defaultValue: "" },
+  token: { type: DataTypes.STRING(256), allowNull: true },
+  role: { type: DataTypes.STRING(16), defaultValue: "user" },
+}, {
+  tableName: "users",
+  underscored: true,
+});
+
 // 数据库初始化方法
 async function init() {
   await Counter.sync({ alter: true });
   await Order.sync({ alter: true });
+  await User.sync({ alter: true });
 }
 
 // 导出初始化方法和模型
@@ -46,4 +62,5 @@ module.exports = {
   init,
   Counter,
   Order,
+  User,
 };

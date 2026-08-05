@@ -4,8 +4,9 @@ const cors = require("cors");
 const morgan = require("morgan");
 const https = require("https");
 const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
 const fs = require("fs");
-const { init: initDB, Counter, Order } = require("./db");
+const { init: initDB, Counter, Order, User } = require("./db");
 
 try { require("dotenv").config(); } catch (_) {}
 
@@ -50,6 +51,76 @@ async function getAccessToken() {
   return _accessToken;
 }
 
+// ==================== JWT & 微信服务 ====================
+
+const JWT_SECRET = process.env.JWT_SECRET || "chuangjingxr-jwt-secret";
+const JWT_EXPIRES = process.env.JWT_EXPIRES || "7d";
+
+function generateToken(user) {
+  return jwt.sign({ id: user.id, openid: user.openid, phone: user.phone, role: user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+}
+
+function sanitizeUser(user) {
+  return {
+    id: user.id,
+    openid: user.openid,
+    phone: user.phone,
+    nickname: user.nickname,
+    avatar: user.avatar,
+    role: user.role,
+  };
+}
+
+/**
+ * 微信 code → openid + session_key
+ * @param {string} code - Taro.login() 返回的 code
+ * @returns {{ openid: string, session_key: string }}
+ */
+async function jscode2session(code) {
+  const url = `https://api.weixin.qq.com/sns/jscode2session?appid=${APPID}&secret=${APPSECRET}&js_code=${code}&grant_type=authorization_code`;
+  return new Promise((resolve, reject) => {
+    https.get(url, (resp) => {
+      let d = "";
+      resp.on("data", (c) => (d += c));
+      resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+    }).on("error", reject);
+  });
+}
+
+/**
+ * 微信 phoneCode → 真实手机号（需 access_token）
+ * @param {string} phoneCode - getPhoneNumber 返回的 code
+ * @returns {string} 纯手机号（不带区号）
+ */
+async function getPhoneNumber(phoneCode) {
+  const token = await getAccessToken();
+  const payload = JSON.stringify({ code: phoneCode });
+  const apiUrl = `https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=${token}`;
+  const parsed = new URL(apiUrl);
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+    }, (resp) => {
+      let d = "";
+      resp.on("data", (c) => (d += c));
+      resp.on("end", () => {
+        try {
+          const r = JSON.parse(d);
+          if (r.errcode && r.errcode !== 0) reject(new Error(r.errmsg || `errcode=${r.errcode}`));
+          else resolve(r.phone_info.purePhoneNumber);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
 // ==================== 路由 ====================
 
 app.get("/", async (req, res) => {
@@ -70,10 +141,122 @@ app.get("/api/count", async (req, res) => {
   res.send({ code: 0, data: await Counter.count() });
 });
 
+// ==================== 登录/注册 ====================
+
+/** auth 中间件 — 后续需要鉴权的接口使用 */
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
+  if (!token) return res.send({ code: 401, msg: "未登录", data: null });
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (e) {
+    return res.send({ code: 401, msg: "登录已过期，请重新登录", data: null });
+  }
+}
+
 /**
- * 云托管消息推送回调（仅用于配置检测，不自动下发链接）
- * POST /api/wechat-cs
+ * 登录/注册
+ * POST /api/xrAppletMobileLogin
+ *
+ * Body: { deviceKey, code, phoneCode, avatar?, nickname?, password? }
+ * - 后端用 code → openid, phoneCode → 真实手机号
+ * - 不传 password → 检测是否已注册：已注册返 { registered:true, token }；未注册返 { registered:false }
+ * - 传 password → 注册新用户并登录
  */
+app.post("/api/xrAppletMobileLogin", async (req, res) => {
+  try {
+    const { code, phoneCode, avatar, nickname, password } = req.body || {};
+
+    if (!code) return res.send({ code: 400, msg: "缺少登录凭证 code", data: null });
+    if (!phoneCode) return res.send({ code: 400, msg: "缺少手机号凭证 phoneCode", data: null });
+
+    // 1. code → openid
+    const wxData = await jscode2session(code);
+    const { openid, errcode, errmsg } = wxData;
+    if (errcode) return res.send({ code: 500, msg: `微信登录失败: ${errmsg}`, data: null });
+    console.log("[LOGIN] jscode2session 成功, openid:", (openid || "").substring(0, 10) + "...");
+
+    // 2. phoneCode → 真实手机号
+    let phone = null;
+    try {
+      phone = await getPhoneNumber(phoneCode);
+      console.log("[LOGIN] 手机号获取成功:", (phone || "").substring(0, 3) + "****");
+    } catch (e) {
+      console.warn("[LOGIN] 获取手机号失败:", e.message);
+      return res.send({ code: 500, msg: "获取手机号失败，请重试", data: null });
+    }
+
+    // 3. 查找用户 — 先按手机号，再按 openid
+    let user = null;
+    let isNew = false;
+
+    // 按手机号找
+    if (phone) user = await User.findOne({ where: { phone } });
+
+    // 按 openid 找（openid 和手机号不是同一人时，以手机号为准绑 openid）
+    if (!user && openid) user = await User.findOne({ where: { openid } });
+
+    if (!user) {
+      // 未找到用户 → 判断是仅检测还是注册
+      if (!password) {
+        // 无密码 → 仅检测，返回未注册
+        return res.send({ code: 200, msg: "ok", data: { registered: false, token: null, userId: null } });
+      }
+
+      // 有密码 → 新用户注册
+      user = await User.create({
+        openid,
+        phone: phone || null,
+        password, // TODO: 生产环境应 bcrypt 哈希
+        nickname: nickname || "微信用户",
+        avatar: avatar || "",
+      });
+      isNew = true;
+      console.log("[LOGIN] 新用户注册: id=" + user.id + ", phone=" + (phone || "").substring(0, 3) + "****");
+    } else {
+      // 已有用户 → 更新信息
+      let updated = false;
+
+      // 手机号登录用户可能没有 openid，绑上
+      if (openid && !user.openid) { user.openid = openid; updated = true; }
+
+      // 头像/昵称首次或默认时更新
+      if (avatar && (!user.avatar || user.avatar === "")) { user.avatar = avatar; updated = true; }
+      if (nickname && (user.nickname === "微信用户" || !user.nickname)) { user.nickname = nickname; updated = true; }
+
+      // 如果传了 password → 设置/更新密码
+      if (password) { user.password = password; updated = true; }
+
+      if (updated) await user.save();
+
+      // 已有密码视为已注册
+      if (!password && !user.password) {
+        return res.send({ code: 200, msg: "ok", data: { registered: false, token: null, userId: null } });
+      }
+
+      console.log("[LOGIN] 已有用户登录: id=" + user.id);
+    }
+
+    // 4. 签发 token 并写入库
+    const token = generateToken(user);
+    user.token = token;
+    await user.save();
+
+    res.send({
+      code: 200,
+      msg: isNew ? "注册成功" : "登录成功",
+      data: { registered: true, token, userId: user.id, user: sanitizeUser(user) },
+    });
+  } catch (err) {
+    console.error("[LOGIN] 异常:", err.message);
+    res.send({ code: 500, msg: "服务器异常", data: null });
+  }
+});
+
+// ==================== 微信客服 ====================
 app.post("/api/wechat-cs", async (req, res) => {
   const body = req.body || {};
   console.log("[CS] 收到推送:", JSON.stringify(body).substring(0, 500));
@@ -159,6 +342,19 @@ app.get("/api/wechat-cs/config-status", (req, res) => {
       appSecretConfigured: !!APPSECRET,
     },
   });
+});
+
+// ==================== 用户信息 ====================
+
+/** 获取当前用户信息（需登录） */
+app.get("/api/user/info", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id);
+    if (!user) return res.send({ code: 404, msg: "用户不存在", data: null });
+    res.send({ code: 200, msg: "ok", data: sanitizeUser(user) });
+  } catch (err) {
+    res.send({ code: 500, msg: err.message, data: null });
+  }
 });
 
 // ==================== 微信支付 ====================
@@ -464,6 +660,8 @@ async function bootstrap() {
 
   app.listen(port, () => {
     console.log("启动成功，端口:", port);
+    console.log("登录注册: POST /api/xrAppletMobileLogin");
+    console.log("用户信息: GET /api/user/info");
     console.log("微信客服下发: POST /api/wechat-cs/send");
     console.log("微信支付下单: POST /api/pay/order");
     console.log(`WECHAT_APPID: ${APPID ? "已配置" : "❌ 未配置"}`);
