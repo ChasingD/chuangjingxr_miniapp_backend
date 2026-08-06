@@ -291,14 +291,14 @@ app.post("/api/wechat-cs/send", async (req, res) => {
     return res.send({ code: 400, msg: "缺少 linkUrl 参数", data: null });
   }
 
-  try {
+  async function sendOnce() {
     const token = await getAccessToken();
-    const content = `点击下方链接即可在浏览器中打开：\n\n${linkUrl}`;
+    const content = "点击下方链接即可在浏览器中打开：\n\n" + linkUrl;
     const payload = JSON.stringify({ touser: openId, msgtype: "text", text: { content } });
-    const apiUrl = `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`;
+    const apiUrl = "https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=" + token;
     const parsed = new URL(apiUrl);
 
-    await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const req2 = https.request({
         hostname: parsed.hostname,
         path: parsed.pathname + parsed.search,
@@ -308,26 +308,36 @@ app.post("/api/wechat-cs/send", async (req, res) => {
         let d = "";
         resp.on("data", (c) => (d += c));
         resp.on("end", () => {
-          try {
-            const r = JSON.parse(d);
-            if (r.errcode && r.errcode !== 0) {
-              console.error("[CS] 微信API返回错误:", d);
-              reject(new Error(r.errmsg || `errcode=${r.errcode}`));
-            } else {
-              console.log("[CS] 发送成功");
-              resolve();
-            }
-          } catch (e) { reject(e); }
+          try { resolve(JSON.parse(d)); } catch (e) { reject(e); }
         });
       });
       req2.on("error", reject);
       req2.write(payload);
       req2.end();
     });
+  }
 
-    return res.send({ code: 200, msg: "消息已发送", data: { openId } });
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  try {
+    let lastResult = null;
+    // openType="contact" 打开客服会话和本 API 是并行的——
+    // 第一次进入时客服会话可能尚未建立完毕，微信 API 返回 45047。
+    // 重试 2 次，间隔 1.5s 等会话就绪。
+    for (let i = 0; i < 3; i++) {
+      const result = await sendOnce();
+      lastResult = result;
+      if (!result.errcode || result.errcode === 0) {
+        console.log("[CS] 发送成功" + (i > 0 ? "（第" + (i + 1) + "次尝试）" : ""));
+        return res.send({ code: 200, msg: "消息已发送", data: { openId } });
+      }
+      console.warn("[CS] errcode=" + result.errcode + " " + (result.errmsg || "") + "，" + (i < 2 ? "1.5s 后重试..." : "已达最大重试次数"));
+      if (i < 2) await sleep(1500);
+    }
+    console.error("[CS] 最终失败:", JSON.stringify(lastResult));
+    return res.send({ code: 500, msg: lastResult.errmsg || "发送失败", data: null });
   } catch (err) {
-    console.error("[CS] send 失败:", err.message || err);
+    console.error("[CS] send 异常:", err.message || err);
     return res.send({ code: 500, msg: err.message || "发送失败", data: null });
   }
 });
