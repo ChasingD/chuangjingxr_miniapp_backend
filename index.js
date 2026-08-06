@@ -570,7 +570,7 @@ async function queryWechatOrder(outTradeNo) {
  */
 app.post("/api/pay/order", async (req, res) => {
   const openid = req.headers["x-wx-openid"] || "";
-  const { productType, productId } = req.body || {};
+  const { productType, productId, merOrderId } = req.body || {};
 
   if (!openid) return res.send({ code: 401, msg: "未获取到用户 openid", data: null });
   if (!productType || !productId) return res.send({ code: 400, msg: "缺少参数", data: null });
@@ -580,11 +580,12 @@ app.post("/api/pay/order", async (req, res) => {
     if (amount === 0) return res.send({ code: 400, msg: "该商品暂不支持购买", data: null });
 
     const description = getDescription(productType, productId);
-    const orderId = crypto.randomBytes(16).toString("hex"); // 32位 hex
+    // 使用自有后台的 merOrderId，未传则自动生成
+    const orderId = merOrderId || crypto.randomBytes(16).toString("hex");
 
     // 1. 写订单
     await Order.create({ id: orderId, openid, productType, productId, amount, status: "pending" });
-    console.log("[PAY] 订单创建:", orderId, productType, productId, amount + "分");
+    console.log("[PAY] 订单创建:", orderId, productType, productId, amount + "分", merOrderId ? "(外部订单)" : "(内部订单)");
 
     // 2. 调微信 JSAPI 下单
     const jsapiBody = JSON.stringify({
