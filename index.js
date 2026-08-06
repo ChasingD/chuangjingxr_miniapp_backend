@@ -570,14 +570,17 @@ async function queryWechatOrder(outTradeNo) {
  */
 app.post("/api/pay/order", async (req, res) => {
   const openid = req.headers["x-wx-openid"] || "";
-  const { productType, productId, merOrderId } = req.body || {};
+  const { productType, productId, merOrderId, amount: reqAmount } = req.body || {};
 
   if (!openid) return res.send({ code: 401, msg: "未获取到用户 openid", data: null });
   if (!productType || !productId) return res.send({ code: 400, msg: "缺少参数", data: null });
 
   try {
-    const amount = getAmount(productType, productId);
-    if (amount === 0) return res.send({ code: 400, msg: "该商品暂不支持购买", data: null });
+    // 金额：前端传了就用前端的（来自价格接口），没传则用后端固定定价
+    const amount = (reqAmount != null && Number.isFinite(reqAmount) && reqAmount > 0)
+      ? reqAmount
+      : getAmount(productType, productId);
+    if (amount <= 0) return res.send({ code: 400, msg: "该商品暂不支持购买", data: null });
 
     const description = getDescription(productType, productId);
     // 使用自有后台的 merOrderId，未传则自动生成
