@@ -37,6 +37,9 @@ const Order = sequelize.define("Order", {
   status: { type: DataTypes.STRING(16), allowNull: false, defaultValue: "pending" },
   prepayId: { type: DataTypes.STRING(64), field: "prepay_id" },
   transactionId: { type: DataTypes.STRING(64), field: "transaction_id" },
+  userId: { type: DataTypes.INTEGER, field: "user_id" },
+  phone: { type: DataTypes.STRING(20) },
+  nickname: { type: DataTypes.STRING(64) },
   paidAt: { type: DataTypes.DATE, field: "paid_at" },
 }, {
   tableName: "orders",
