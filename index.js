@@ -159,6 +159,54 @@ function authMiddleware(req, res, next) {
 }
 
 /**
+ * 同步用户信息到云托管
+ * POST /api/user/sync
+ *
+ * 前端登录成功后调用，通过 callContainer 内网注入 x-wx-openid。
+ * 用途：支付时后端用 openid 查 users 表获取联系方式写入 orders。
+ */
+app.post("/api/user/sync", async (req, res) => {
+  const openid = req.headers["x-wx-openid"] || "";
+  const { phone, nickname, avatar } = req.body || {};
+
+  console.log(`[SYNC] openid=${openid ? openid.substring(0, 10) + "..." : "(无)"}, phone=${(phone || "").substring(0, 3)}****`);
+
+  if (!openid) {
+    return res.send({ code: 400, msg: "未获取到用户 openid", data: null });
+  }
+
+  try {
+    let user = await User.findOne({ where: { openid } });
+
+    if (user) {
+      // 已存在 → 更新
+      const updates = {};
+      if (phone) updates.phone = phone;
+      if (nickname) updates.nickname = nickname;
+      if (avatar) updates.avatar = avatar;
+      if (Object.keys(updates).length > 0) {
+        await user.update(updates);
+        console.log("[SYNC] 用户已更新: id=" + user.id);
+      }
+    } else {
+      // 不存在 → 创建
+      user = await User.create({
+        openid,
+        phone: phone || null,
+        nickname: nickname || "微信用户",
+        avatar: avatar || "",
+      });
+      console.log("[SYNC] 新用户创建: id=" + user.id);
+    }
+
+    res.send({ code: 200, msg: "ok", data: { userId: user.id } });
+  } catch (err) {
+    console.error("[SYNC] 异常:", err.message);
+    res.send({ code: 500, msg: err.message || "同步失败", data: null });
+  }
+});
+
+/**
  * 登录/注册
  * POST /api/xrAppletMobileLogin
  *
