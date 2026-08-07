@@ -634,15 +634,16 @@ app.post("/api/pay/order", async (req, res) => {
     // 使用自有后台的 merOrderId，未传则自动生成
     const orderId = merOrderId || crypto.randomBytes(16).toString("hex");
 
-    // 0. 查用户信息（用于客服售后联系）
+    // 0. 查/建用户信息（用于客服售后联系；兜底：即使 sync 未完成也能建立映射）
     let userId = null, userPhone = null, userNickname = null;
     try {
-      const user = await User.findOne({ where: { openid } });
-      if (user) {
-        userId = user.id;
-        userPhone = user.phone;
-        userNickname = user.nickname;
-      }
+      const [user] = await User.findOrCreate({
+        where: { openid },
+        defaults: { nickname: "微信用户", avatar: "" },
+      });
+      userId = user.id;
+      userPhone = user.phone;
+      userNickname = user.nickname;
     } catch (e) {
       console.warn("[PAY] 查用户信息失败（不影响下单）:", e.message);
     }
