@@ -634,9 +634,34 @@ app.post("/api/pay/order", async (req, res) => {
     // 使用自有后台的 merOrderId，未传则自动生成
     const orderId = merOrderId || crypto.randomBytes(16).toString("hex");
 
+    // 0. 查用户信息（用于客服售后联系）
+    let userId = null, userPhone = null, userNickname = null;
+    try {
+      const user = await User.findOne({ where: { openid } });
+      if (user) {
+        userId = user.id;
+        userPhone = user.phone;
+        userNickname = user.nickname;
+      }
+    } catch (e) {
+      console.warn("[PAY] 查用户信息失败（不影响下单）:", e.message);
+    }
+
     // 1. 写订单
-    await Order.create({ id: orderId, openid, productType, productId, amount, status: "pending" });
-    console.log("[PAY] 订单创建:", orderId, productType, productId, amount + "分", merOrderId ? "(外部订单)" : "(内部订单)");
+    await Order.create({
+      id: orderId,
+      openid,
+      productType,
+      productId,
+      amount,
+      status: "pending",
+      userId,
+      phone: userPhone,
+      nickname: userNickname,
+    });
+    console.log("[PAY] 订单创建:", orderId, productType, productId, amount + "分",
+      merOrderId ? "(外部订单)" : "(内部订单)",
+      userId ? "userId=" + userId : "(用户信息缺失)");
 
     // 2. 调微信 JSAPI 下单
     const jsapiBody = JSON.stringify({
