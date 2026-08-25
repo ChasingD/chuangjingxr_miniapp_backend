@@ -632,7 +632,9 @@ app.post("/api/pay/order", async (req, res) => {
 
     const description = getDescription(productType, productId);
     // 使用自有后台的 merOrderId，未传则自动生成
-    const orderId = merOrderId || crypto.randomBytes(16).toString("hex");
+    // 坑：serverback 续费返回的 newMerOrderId 可能固定复用（同一未支付续费单），再次下单会主键冲突
+    // → 冲突时自生成新订单号继续（微信支付用新号；回调 serverback 仍用 serverback 订单号，两者解耦）
+    let orderId = merOrderId || crypto.randomBytes(16).toString("hex");
 
     // 0. 查/建用户信息（用于客服售后联系；兜底：即使 sync 未完成也能建立映射）
     let userId = null, userPhone = null, userNickname = null;
@@ -649,8 +651,8 @@ app.post("/api/pay/order", async (req, res) => {
     }
 
     // 1. 写订单
-    await Order.create({
-      id: orderId,
+    const createOrderRecord = (oid) => Order.create({
+      id: oid,
       openid,
       productType,
       productId,
@@ -660,6 +662,17 @@ app.post("/api/pay/order", async (req, res) => {
       phone: userPhone,
       nickname: userNickname,
     });
+    try {
+      await createOrderRecord(orderId);
+    } catch (err) {
+      if (err.name === "SequelizeUniqueConstraintError" || /ER_DUP_ENTRY/i.test(err.message)) {
+        console.warn("[PAY] 订单号冲突（serverback 返回重复 merOrderId）:", orderId, "→ 自生成新订单号");
+        orderId = crypto.randomBytes(16).toString("hex");
+        await createOrderRecord(orderId);
+      } else {
+        throw err;
+      }
+    }
     console.log("[PAY] 订单创建:", orderId, productType, productId, amount + "分",
       merOrderId ? "(外部订单)" : "(内部订单)",
       userId ? "userId=" + userId : "(用户信息缺失)");
