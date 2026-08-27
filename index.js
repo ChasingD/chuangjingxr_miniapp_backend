@@ -424,12 +424,28 @@ app.post("/api/wechat/exchange-phone", async (req, res) => {
   }
 });
 
+/** 用微信 code 换 openid（无需登录） */
+app.get("/api/openid", async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.send({ code: 400, msg: "code 参数必填", data: null });
+  try {
+    const result = await jscode2session(code);
+    if (result.errcode) return res.send({ code: 400, msg: result.errmsg || "换取 openid 失败", data: null });
+    res.send({ code: 200, msg: "ok", data: { openid: result.openid || "", session_key: result.session_key || "" } });
+  } catch (err) {
+    res.send({ code: 500, msg: err.message, data: null });
+  }
+});
+
 /** 获取当前用户信息（需登录） */
 app.get("/api/user/info", authMiddleware, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id);
     if (!user) return res.send({ code: 404, msg: "用户不存在", data: null });
-    res.send({ code: 200, msg: "ok", data: sanitizeUser(user) });
+    const data = sanitizeUser(user);
+    // token 里的 openid 来自微信登录时的 x-wx-openid，比数据库更实时
+    data.openid = req.user.openid || user.openid || '';
+    res.send({ code: 200, msg: "ok", data });
   } catch (err) {
     res.send({ code: 500, msg: err.message, data: null });
   }
