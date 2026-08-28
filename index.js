@@ -437,6 +437,15 @@ app.get("/api/openid", async (req, res) => {
   }
 });
 
+/** 通过 callContainer 内网注入 x-wx-openid 直接取 openid（无需 code/无需登录） */
+app.post("/api/openid", (req, res) => {
+  const openid = req.headers["x-wx-openid"] || "";
+  if (!openid) {
+    return res.send({ code: 400, msg: "未获取到用户 openid（callContainer 未注入 x-wx-openid）", data: null });
+  }
+  res.send({ code: 200, msg: "ok", data: { openid } });
+});
+
 /** 获取当前用户信息（需登录） */
 app.get("/api/user/info", authMiddleware, async (req, res) => {
   try {
