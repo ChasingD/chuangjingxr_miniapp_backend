@@ -976,6 +976,44 @@ app.post("/api/virtual-pay/deliver", async (req, res) => {
   }
 });
 
+/**
+ * 虚拟支付道具查询（调试用）
+ * GET /api/virtual-pay/query-goods?env=1
+ * 调 xpay/query_goods 拉 offerId 下道具列表，核对 offerId/道具/发布状态/价格
+ */
+app.get("/api/virtual-pay/query-goods", async (req, res) => {
+  const env = Number(req.query.env != null ? req.query.env : 1);
+  if (!VIRTUAL_PAY_OFFER_ID) return res.send({ code: 500, msg: "未配置 VIRTUAL_PAY_OFFER_ID", data: null });
+  try {
+    const token = await getAccessToken();
+    const payload = JSON.stringify({ env, offer_id: VIRTUAL_PAY_OFFER_ID, page_index: 1, page_size: 50 });
+    const parsed = new URL("https://api.weixin.qq.com/xpay/query_goods?access_token=" + token);
+    const r = await new Promise((resolve, reject) => {
+      const req2 = https.request({
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      }, (resp) => {
+        let d = "";
+        resp.on("data", (c) => (d += c));
+        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+      });
+      req2.on("error", reject);
+      req2.write(payload);
+      req2.end();
+    });
+    console.log("[VP] query_goods env=" + env, JSON.stringify(r));
+    if (r.errcode && r.errcode !== 0) {
+      return res.send({ code: 500, msg: r.errmsg || "查询道具失败", data: r });
+    }
+    return res.send({ code: 200, msg: "ok", data: r });
+  } catch (err) {
+    console.error("[VP] query_goods 异常:", err.message);
+    return res.send({ code: 500, msg: err.message || "查询道具失败", data: null });
+  }
+});
+
 const port = process.env.PORT || 80;
 
 async function bootstrap() {
@@ -988,6 +1026,7 @@ async function bootstrap() {
     console.log("微信客服下发: POST /api/wechat-cs/send");
     console.log("微信支付下单: POST /api/pay/order");
     console.log("虚拟支付预下单: POST /api/virtual-pay/pre-create");
+    console.log("虚拟支付道具查询: GET /api/virtual-pay/query-goods?env=1");
     console.log("虚拟支付发货: POST /api/virtual-pay/deliver");
     console.log(`WECHAT_APPID: ${APPID ? "已配置" : "❌ 未配置"}`);
     console.log(`WECHAT_APPSECRET: ${APPSECRET ? "已配置" : "❌ 未配置"}`);
