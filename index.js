@@ -984,26 +984,31 @@ app.post("/api/virtual-pay/deliver", async (req, res) => {
 app.get("/api/virtual-pay/query-goods", async (req, res) => {
   const env = Number(req.query.env != null ? req.query.env : 1);
   if (!VIRTUAL_PAY_OFFER_ID) return res.send({ code: 500, msg: "未配置 VIRTUAL_PAY_OFFER_ID", data: null });
+  // pay_sig = HMAC-SHA256(AppKey, 路径 + "&" + 请求体)；AppKey 与环境匹配（沙箱用沙箱 key）
+  const appKey = env === 1 ? (VIRTUAL_PAY_APP_KEY_SANDBOX || VIRTUAL_PAY_APP_KEY) : VIRTUAL_PAY_APP_KEY;
+  if (!appKey) return res.send({ code: 500, msg: "未配置 AppKey", data: null });
   try {
     const token = await getAccessToken();
-    const payload = JSON.stringify({ env, offer_id: VIRTUAL_PAY_OFFER_ID, page_index: 1, page_size: 50 });
-    const parsed = new URL("https://api.weixin.qq.com/xpay/query_goods?access_token=" + token);
+    const body = JSON.stringify({ env });
+    const path = "/xpay/query_publish_goods";
+    const paySig = hmacSha256Hex(appKey, path + "&" + body);
+    const parsed = new URL("https://api.weixin.qq.com" + path + "?access_token=" + token + "&pay_sig=" + paySig);
     const r = await new Promise((resolve, reject) => {
       const req2 = https.request({
         hostname: parsed.hostname,
         path: parsed.pathname + parsed.search,
         method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
       }, (resp) => {
         let d = "";
         resp.on("data", (c) => (d += c));
         resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
       });
       req2.on("error", reject);
-      req2.write(payload);
+      req2.write(body);
       req2.end();
     });
-    console.log("[VP] query_goods env=" + env, JSON.stringify(r));
+    console.log("[VP] query_publish_goods env=" + env, JSON.stringify(r));
     if (r.errcode && r.errcode !== 0) {
       return res.send({ code: 500, msg: r.errmsg || "查询道具失败", data: r });
     }
