@@ -833,6 +833,149 @@ app.get("/api/pay/order/:id", async (req, res) => {
   res.send({ code: 200, msg: "ok", data: order });
 });
 
+// ==================== 小程序虚拟支付（米大师） ====================
+// 官方能力: https://developers.weixin.qq.com/miniprogram/dev/platform-capabilities/business-capabilities/virtual-payment.html
+// 前提: MP 后台开通虚拟支付 → offerId + AppKey（现网/沙箱）+ 虚拟支付专用二级商户号
+// 前端: Taro.login() code → /api/virtual-pay/pre-create → wx.requestVirtualPayment → /api/virtual-pay/deliver
+
+const VIRTUAL_PAY_OFFER_ID = process.env.VIRTUAL_PAY_OFFER_ID || "";
+const VIRTUAL_PAY_APP_KEY = process.env.VIRTUAL_PAY_APP_KEY || "";
+const VIRTUAL_PAY_APP_KEY_SANDBOX = process.env.VIRTUAL_PAY_APP_KEY_SANDBOX || "";
+
+function hmacSha256Hex(key, data) {
+  return crypto.createHmac("sha256", String(key)).update(data, "utf8").digest("hex");
+}
+
+/** 模板固定价位道具: 金额(分) → 道具 productId（商户后台需按实际价格档配置同名同价道具） */
+function templateVirtualProductId(amountFen) {
+  return "scene_" + amountFen;
+}
+
+/** 虚拟支付道具 id 只允许 [A-Za-z0-9_]，会员 productId 中横线转下划线（vip-1 → vip_1，vip-monthly → vip_monthly） */
+function membershipVirtualProductId(productId) {
+  return String(productId).replace(/-/g, "_");
+}
+
+/** outTradeNo: 8-32 位，仅 [A-Za-z0-9_\-|*@]，不能下划线开头；优先用 serverback merOrderId，不合法则自生成 */
+function buildOutTradeNo(merOrderId) {
+  const raw = (merOrderId && String(merOrderId).trim()) || "";
+  if (/^[A-Za-z0-9_\-|*@]{8,32}$/.test(raw)) return raw;
+  return crypto.randomBytes(16).toString("hex");
+}
+
+/**
+ * 虚拟支付预下单（签名直购）
+ * POST /api/virtual-pay/pre-create
+ * Body: { code, productType, productId, merOrderId?, amountYuan?, env? }
+ * 流程: wx.login code → code2Session 拿 session_key → 组 signData → paySig(APP_KEY)/signature(session_key)
+ * 返回: { mode, offerId, env, paySig, signData, signature, outTradeNo }  → 直喂 wx.requestVirtualPayment
+ */
+app.post("/api/virtual-pay/pre-create", async (req, res) => {
+  const { code, productType, productId, merOrderId, amountYuan, env = 0 } = req.body || {};
+  if (!code) return res.send({ code: 400, msg: "缺少 wx.login code", data: null });
+  if (!productType || !productId) return res.send({ code: 400, msg: "缺少商品参数", data: null });
+
+  const sandbox = Number(env) === 1;
+
+  try {
+    // 1. 金额: 会员走后端固定价；模板按前端实价（价格接口），兜底拒绝 0/负价
+    let goodsPrice;
+    if (productType === "scene_purchase") {
+      goodsPrice = Math.round((Number(amountYuan) || 0) * 100);
+      if (!Number.isFinite(goodsPrice) || goodsPrice <= 0) {
+        return res.send({ code: 400, msg: "该商品暂不支持购买", data: null });
+      }
+    } else {
+      goodsPrice = getAmount(productType, productId);
+    }
+
+    // 2. 虚拟支付道具 id: 模板用固定价位道具（scene_分），会员把横线转下划线（道具 id 只允许 [A-Za-z0-9_]）
+    const vpProductId = productType === "scene_purchase"
+      ? templateVirtualProductId(goodsPrice)
+      : membershipVirtualProductId(productId);
+    const vpOfferId = VIRTUAL_PAY_OFFER_ID;
+    if (!vpOfferId) return res.send({ code: 500, msg: "虚拟支付未配置 offerId（环境变量 VIRTUAL_PAY_OFFER_ID）", data: null });
+
+    const appKey = sandbox ? (VIRTUAL_PAY_APP_KEY_SANDBOX || VIRTUAL_PAY_APP_KEY) : VIRTUAL_PAY_APP_KEY;
+    if (!appKey) return res.send({ code: 500, msg: "虚拟支付未配置 AppKey（环境变量 VIRTUAL_PAY_APP_KEY）", data: null });
+
+    // 3. code → session_key（单次有效）
+    const wxData = await jscode2session(code);
+    if (wxData.errcode) {
+      return res.send({ code: 500, msg: "微信登录失败: " + (wxData.errmsg || wxData.errcode), data: null });
+    }
+    const sessionKey = wxData.session_key;
+    if (!sessionKey) return res.send({ code: 500, msg: "未获取到 session_key", data: null });
+
+    // 4. outTradeNo（会员沿用 serverback merOrderId，回调激活用）
+    const outTradeNo = buildOutTradeNo(merOrderId);
+
+    // 5. 组装 signData（字段勿多勿少；多传会被微信拒）
+    const signData = JSON.stringify({
+      offerId: vpOfferId,
+      buyQuantity: 1,
+      env: sandbox ? 1 : 0,
+      currencyType: "CNY",
+      productId: vpProductId,
+      goodsPrice,
+      outTradeNo,
+    });
+
+    // 双签名: paySig = HMAC-SHA256(AppKey, "requestVirtualPayment&" + signData)；signature = HMAC-SHA256(session_key, signData)
+    const paySig = hmacSha256Hex(appKey, "requestVirtualPayment&" + signData);
+    const signature = hmacSha256Hex(sessionKey, signData);
+
+    console.log("[VP] 预下单: outTradeNo=" + outTradeNo, productType, vpProductId, goodsPrice + "分", "env=" + (sandbox ? "沙箱" : "现网"));
+    return res.send({
+      code: 200, msg: "ok",
+      data: { mode: "short_series_goods", offerId: vpOfferId, env: sandbox ? 1 : 0, paySig, signData, signature, outTradeNo },
+    });
+  } catch (err) {
+    console.error("[VP] pre-create 异常:", err.message);
+    return res.send({ code: 500, msg: err.message || "虚拟支付下单失败", data: null });
+  }
+});
+
+/**
+ * 虚拟支付发货确认
+ * POST /api/virtual-pay/deliver
+ * Body: { orderId, env? }
+ * 调 xpay/notify_provide_goods 标记已发货（15 天不发货自动退款，必须确认）
+ */
+app.post("/api/virtual-pay/deliver", async (req, res) => {
+  const { orderId, env = 0 } = req.body || {};
+  if (!orderId) return res.send({ code: 400, msg: "缺少 orderId", data: null });
+  try {
+    const token = await getAccessToken();
+    const payload = JSON.stringify({ order_id: String(orderId), env: Number(env) });
+    const parsed = new URL("https://api.weixin.qq.com/xpay/notify_provide_goods?access_token=" + token);
+    const r = await new Promise((resolve, reject) => {
+      const req2 = https.request({
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      }, (resp) => {
+        let d = "";
+        resp.on("data", (c) => (d += c));
+        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+      });
+      req2.on("error", reject);
+      req2.write(payload);
+      req2.end();
+    });
+    if (r.errcode && r.errcode !== 0) {
+      console.error("[VP] 发货确认失败:", JSON.stringify(r));
+      return res.send({ code: 500, msg: r.errmsg || "发货确认失败", data: null });
+    }
+    console.log("[VP] 发货确认成功: orderId=" + orderId, "env=" + Number(env));
+    return res.send({ code: 200, msg: "ok", data: null });
+  } catch (err) {
+    console.error("[VP] deliver 异常:", err.message);
+    return res.send({ code: 500, msg: err.message || "发货确认失败", data: null });
+  }
+});
+
 const port = process.env.PORT || 80;
 
 async function bootstrap() {
@@ -844,9 +987,14 @@ async function bootstrap() {
     console.log("用户信息: GET /api/user/info");
     console.log("微信客服下发: POST /api/wechat-cs/send");
     console.log("微信支付下单: POST /api/pay/order");
+    console.log("虚拟支付预下单: POST /api/virtual-pay/pre-create");
+    console.log("虚拟支付发货: POST /api/virtual-pay/deliver");
     console.log(`WECHAT_APPID: ${APPID ? "已配置" : "❌ 未配置"}`);
     console.log(`WECHAT_APPSECRET: ${APPSECRET ? "已配置" : "❌ 未配置"}`);
     console.log(`WECHAT_PAY_MCHID: ${PAY_MCHID ? "已配置" : "❌ 未配置"}`);
+    console.log(`VIRTUAL_PAY_OFFER_ID: ${VIRTUAL_PAY_OFFER_ID ? "已配置" : "❌ 未配置"}`);
+    console.log(`VIRTUAL_PAY_APP_KEY: ${VIRTUAL_PAY_APP_KEY ? "已配置" : "❌ 未配置"}`);
+    console.log(`VIRTUAL_PAY_APP_KEY_SANDBOX: ${VIRTUAL_PAY_APP_KEY_SANDBOX ? "已配置" : "❌ 未配置"}`);
   });
 }
 
