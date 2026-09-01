@@ -945,10 +945,15 @@ app.post("/api/virtual-pay/pre-create", async (req, res) => {
 app.post("/api/virtual-pay/deliver", async (req, res) => {
   const { orderId, env = 0 } = req.body || {};
   if (!orderId) return res.send({ code: 400, msg: "缺少 orderId", data: null });
+  const appKey = Number(env) === 1 ? (VIRTUAL_PAY_APP_KEY_SANDBOX || VIRTUAL_PAY_APP_KEY) : VIRTUAL_PAY_APP_KEY;
+  if (!appKey) return res.send({ code: 500, msg: "未配置 AppKey", data: null });
   try {
     const token = await getAccessToken();
     const payload = JSON.stringify({ order_id: String(orderId), env: Number(env) });
-    const parsed = new URL("https://api.weixin.qq.com/xpay/notify_provide_goods?access_token=" + token);
+    // pay_sig = HMAC-SHA256(AppKey, 路径 + "&" + 请求体)；发货确认也须带 pay_sig（缺则 268490002 签名字段为空）
+    const path = "/xpay/notify_provide_goods";
+    const paySig = hmacSha256Hex(appKey, path + "&" + payload);
+    const parsed = new URL("https://api.weixin.qq.com" + path + "?access_token=" + token + "&pay_sig=" + paySig);
     const r = await new Promise((resolve, reject) => {
       const req2 = https.request({
         hostname: parsed.hostname,
