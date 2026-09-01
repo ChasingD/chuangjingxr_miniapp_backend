@@ -977,6 +977,72 @@ app.post("/api/virtual-pay/deliver", async (req, res) => {
 });
 
 /**
+ * 虚拟支付退款（沙箱测试款退还）
+ * POST /api/virtual-pay/refund
+ * Body: { code, orderId, refundFee, refundReason?, env? }
+ * 流程: wx.login code → code2Session 拿 openid（同一用户，可退该用户历史单）→ 组 refund body → pay_sig → xpay/refund_order
+ * 注意: 接口只「启动退款任务」，最终状态需 query_order 确认；此处全额退（left_fee=refund_fee=refundFee）
+ */
+app.post("/api/virtual-pay/refund", async (req, res) => {
+  const { code, orderId, refundFee, refundReason, env = 0 } = req.body || {};
+  if (!code) return res.send({ code: 400, msg: "缺少 wx.login code", data: null });
+  if (!orderId) return res.send({ code: 400, msg: "缺少 orderId", data: null });
+  const sandbox = Number(env) === 1;
+  const fee = Number(refundFee);
+  if (!Number.isFinite(fee) || fee <= 0) return res.send({ code: 400, msg: "退款金额无效", data: null });
+
+  const appKey = sandbox ? (VIRTUAL_PAY_APP_KEY_SANDBOX || VIRTUAL_PAY_APP_KEY) : VIRTUAL_PAY_APP_KEY;
+  if (!appKey) return res.send({ code: 500, msg: "虚拟支付未配置 AppKey", data: null });
+
+  try {
+    const token = await getAccessToken();
+    const wxData = await jscode2session(code);
+    if (wxData.errcode) {
+      return res.send({ code: 500, msg: "微信登录失败: " + (wxData.errmsg || wxData.errcode), data: null });
+    }
+    const openid = wxData.openid;
+    if (!openid) return res.send({ code: 500, msg: "未获取到 openid", data: null });
+
+    const refundOrderId = crypto.randomBytes(8).toString("hex"); // 退款单号（自定义，随机）
+    const body = JSON.stringify({
+      openid,
+      order_id: String(orderId),
+      refund_order_id: refundOrderId,
+      left_fee: fee,           // 全额退：剩余可退 = 本次退
+      refund_fee: fee,
+      refund_reason: Number(refundReason) || 3, // 3=用户主动退款
+      env: sandbox ? 1 : 0,
+    });
+    const path = "/xpay/refund_order";
+    const paySig = hmacSha256Hex(appKey, path + "&" + body);
+    const parsed = new URL("https://api.weixin.qq.com" + path + "?access_token=" + token + "&pay_sig=" + paySig);
+    const r = await new Promise((resolve, reject) => {
+      const req2 = https.request({
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+      }, (resp) => {
+        let d = "";
+        resp.on("data", (c) => (d += c));
+        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+      });
+      req2.on("error", reject);
+      req2.write(body);
+      req2.end();
+    });
+    console.log("[VP] 退款发起: orderId=" + orderId, "refund_order_id=" + refundOrderId, fee + "分", "env=" + (sandbox ? "沙箱" : "现网"), JSON.stringify(r));
+    if (r.errcode && r.errcode !== 0) {
+      return res.send({ code: 500, msg: r.errmsg || "退款发起失败", data: r });
+    }
+    return res.send({ code: 200, msg: "ok", data: { refundOrderId, ...r } });
+  } catch (err) {
+    console.error("[VP] refund 异常:", err.message);
+    return res.send({ code: 500, msg: err.message || "退款发起失败", data: null });
+  }
+});
+
+/**
  * 虚拟支付道具查询（调试用）
  * GET /api/virtual-pay/query-goods?env=1
  * 调 xpay/query_goods 拉 offerId 下道具列表，核对 offerId/道具/发布状态/价格
@@ -1033,6 +1099,7 @@ async function bootstrap() {
     console.log("虚拟支付预下单: POST /api/virtual-pay/pre-create");
     console.log("虚拟支付道具查询: GET /api/virtual-pay/query-goods?env=1");
     console.log("虚拟支付发货: POST /api/virtual-pay/deliver");
+    console.log("虚拟支付退款: POST /api/virtual-pay/refund");
     console.log(`WECHAT_APPID: ${APPID ? "已配置" : "❌ 未配置"}`);
     console.log(`WECHAT_APPSECRET: ${APPSECRET ? "已配置" : "❌ 未配置"}`);
     console.log(`WECHAT_PAY_MCHID: ${PAY_MCHID ? "已配置" : "❌ 未配置"}`);
