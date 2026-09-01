@@ -113,6 +113,41 @@ async function jscode2session(code) {
 }
 
 /**
+ * 一次性 token 健康探针（双 API 判别 token 是全局坏还是仅 getuserphonenumber 拒）：
+ *  ① 假 code 换 getuserphonenumber —— 40029=token 有效(问题在真 code) / 40001=token 被此 API 拒
+ *  ② 同 token 调 /cgi-bin/getcallbackip —— 0+IP列表=token 全局有效 / 40001=token 全局坏(appid/secret/被作废)
+ * @returns {Promise<void>} 仅打日志
+ */
+async function probeTokenHealth(tag) {
+  try {
+    const token = await getAccessToken();
+    const phParsed = new URL("https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=" + token);
+    const phPayload = JSON.stringify({ code: "PROBE_INVALID_CODE_00000000" });
+    const ph = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: phParsed.hostname, path: phParsed.pathname + phParsed.search,
+        method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(phPayload) },
+      }, (resp) => { let d = ""; resp.on("data", (c) => (d += c)); resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } }); });
+      req.on("error", reject); req.write(phPayload); req.end();
+    });
+    const cbParsed = new URL("https://api.weixin.qq.com/cgi-bin/getcallbackip?access_token=" + token);
+    const cb = await new Promise((resolve, reject) => {
+      const req = https.request({ hostname: cbParsed.hostname, path: cbParsed.pathname + cbParsed.search, method: "GET" },
+        (resp) => { let d = ""; resp.on("data", (c) => (d += c)); resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } }); });
+      req.on("error", reject); req.end();
+    });
+    console.log("[PROBE:" + tag + "] 假code errcode=" + ph.errcode + " (" + (ph.errmsg || "") + ") | getcallbackip errcode=" + cb.errcode + " (" + (cb.errmsg || "") + ") " + (Array.isArray(cb.ip_list) ? "ip_count=" + cb.ip_list.length : ""));
+    console.log("[PROBE:" + tag + "] 判别: " + (
+      cb.errcode === 0 ? "token 全局有效 → 问题在 getuserphonenumber 自身(能力/主体/平台)" :
+      cb.errcode === 40001 ? "token 全局坏 → appid/secret 或 被兄弟容器 force_refresh 作废" :
+      "异常(err=" + cb.errcode + ")"
+    ));
+  } catch (e) {
+    console.log("[PROBE:" + tag + "] 探针异常: " + (e.message || e));
+  }
+}
+
+/**
  * 微信 phoneCode → 真实手机号（需 access_token）
  * @param {string} phoneCode - getPhoneNumber 返回的 code
  * @returns {string} 纯手机号（不带区号）
@@ -164,31 +199,7 @@ async function getPhoneNumber(phoneCode) {
         return retried;
       } catch (err2) {
         console.error("[PHONE] 重试也失败: " + err2.message + (err2.errcode ? " (errcode=" + err2.errcode + ")" : ""));
-        // 探针（一次性诊断）：用同一 token 换假 code，区分「token 无效」vs「真 code 归属问题」。
-        // 假 code → 40029 invalid code = token 有效，问题在真 code；假 code → 40001 = token 对 getuserphonenumber 不可用。
-        try {
-          const probeToken = await getAccessToken();
-          const probePayload = JSON.stringify({ code: "PROBE_INVALID_CODE_00000000" });
-          const probeParsed = new URL(apiUrl + probeToken);
-          const probe = await new Promise((resolve, reject) => {
-            const req = https.request({
-              hostname: probeParsed.hostname,
-              path: probeParsed.pathname + probeParsed.search,
-              method: "POST",
-              headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(probePayload) },
-            }, (resp) => {
-              let d = "";
-              resp.on("data", (c) => (d += c));
-              resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
-            });
-            req.on("error", reject);
-            req.write(probePayload);
-            req.end();
-          });
-          console.log("[PHONE] 探针假code errcode=" + probe.errcode + " errmsg=" + (probe.errmsg || ""));
-        } catch (e2) {
-          console.log("[PHONE] 探针异常: " + (e2.message || e2));
-        }
+        await probeTokenHealth("getPhoneNumber");
         throw err2;
       }
     }
@@ -465,14 +476,20 @@ app.post("/api/wechat-cs/send", async (req, res) => {
 });
 
 /** 调试 */
-app.get("/api/wechat-cs/config-status", (req, res) => {
+app.get("/api/wechat-cs/config-status", async (req, res) => {
   const headerOpenId = req.headers["x-wx-openid"] || "";
+  let probeResult = null;
+  if (req.query.probe === "1") {
+    await probeTokenHealth("config-status"); // 双 API 判别 token 全局 vs 仅 getuserphonenumber
+    probeResult = { triggered: true, seeServerLog: "[PROBE:config-status]" };
+  }
   res.send({
     code: 200, msg: "ok",
     data: {
       openIdFromHeader: !!headerOpenId,
       appIdConfigured: !!APPID,
       appSecretConfigured: !!APPSECRET,
+      probe: probeResult,
     },
   });
 });
