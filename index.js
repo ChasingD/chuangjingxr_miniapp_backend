@@ -856,10 +856,8 @@ function membershipVirtualProductId(productId) {
   return String(productId).replace(/-/g, "_");
 }
 
-/** outTradeNo: 8-32 位，仅 [A-Za-z0-9_\-|*@]，不能下划线开头；优先用 serverback merOrderId，不合法则自生成 */
-function buildOutTradeNo(merOrderId) {
-  const raw = (merOrderId && String(merOrderId).trim()) || "";
-  if (/^[A-Za-z0-9_\-|*@]{8,32}$/.test(raw)) return raw;
+/** outTradeNo: 8-32 位，仅 [A-Za-z0-9_\-|*@]；每次支付独立随机（米大师单号一次性，复用会报 -15012 关单） */
+function buildOutTradeNo() {
   return crypto.randomBytes(16).toString("hex");
 }
 
@@ -907,8 +905,10 @@ app.post("/api/virtual-pay/pre-create", async (req, res) => {
     const sessionKey = wxData.session_key;
     if (!sessionKey) return res.send({ code: 500, msg: "未获取到 session_key", data: null });
 
-    // 4. outTradeNo（会员沿用 serverback merOrderId，回调激活用）
-    const outTradeNo = buildOutTradeNo(merOrderId);
+    // 4. outTradeNo: 每次支付独立随机（米大师单号一次性，失败关单后复用同一单号会报 -15012 请换新单号重试）
+    //    serverback merOrderId 仅作业务关联：支付成功后前端调 serverback 回调激活会员，body 显式传 merOrderId，
+    //    与米大师 outTradeNo 完全解耦，故不复用 merOrderId 作 outTradeNo
+    const outTradeNo = buildOutTradeNo();
 
     // 5. 组装 signData（字段勿多勿少；多传会被微信拒）
     const signData = JSON.stringify({
@@ -925,7 +925,7 @@ app.post("/api/virtual-pay/pre-create", async (req, res) => {
     const paySig = hmacSha256Hex(appKey, "requestVirtualPayment&" + signData);
     const signature = hmacSha256Hex(sessionKey, signData);
 
-    console.log("[VP] 预下单: outTradeNo=" + outTradeNo, productType, vpProductId, goodsPrice + "分", "env=" + (sandbox ? "沙箱" : "现网"));
+    console.log("[VP] 预下单: outTradeNo=" + outTradeNo, productType, vpProductId, goodsPrice + "分", "env=" + (sandbox ? "沙箱" : "现网"), merOrderId ? "merOrderId=" + merOrderId : "");
     return res.send({
       code: 200, msg: "ok",
       data: { mode: "short_series_goods", offerId: vpOfferId, env: sandbox ? 1 : 0, paySig, signData, signature, outTradeNo },
