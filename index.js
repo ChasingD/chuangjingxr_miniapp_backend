@@ -62,9 +62,15 @@ async function getAccessToken(forceRefresh = false) {
 
     if (tokenData.errcode) throw new Error(`获取 access_token 失败: ${tokenData.errmsg}`);
 
+    // 畸形成功响应(errcode 0 但无 access_token)会污染缓存 → 返回 undefined。显式校验。
+    if (!tokenData.access_token) {
+      const keys = Object.keys(tokenData || {}).join(",") || "(empty)";
+      throw new Error(`stable_token 畸形响应: 无 access_token (keys=${keys}) raw=${JSON.stringify(tokenData).slice(0, 200)}`);
+    }
+
     _accessToken = tokenData.access_token;
     _tokenExpireAt = Date.now() + (tokenData.expires_in - 300) * 1000; // 提前5分钟过期
-    console.log("[CS] access_token 已刷新");
+    console.log("[CS] access_token 已刷新 len=" + _accessToken.length);
     return _accessToken;
   })();
 
@@ -160,8 +166,8 @@ async function probeTokenRotation() {
     const r2 = await cbCheck(t2);
     const t3 = await getAccessToken();        // ff: 看新取后缓存是否稳定返回 t2
     const r3 = await cbCheck(t3);
-    const p1 = t1.slice(0, 8), p2 = t2.slice(0, 8), p3 = t3.slice(0, 8);
-    console.log("[PROBE:rotation] ff=" + p1 + " cb=" + r1 + " | ft=" + p2 + " cb=" + r2 + " | ff2=" + p3 + " cb=" + r3);
+    const p1 = (t1 || "UNDEF").slice(0, 8), p2 = (t2 || "UNDEF").slice(0, 8), p3 = (t3 || "UNDEF").slice(0, 8);
+    console.log("[PROBE:rotation] ff=" + p1 + " len=" + ((t1 || "").length) + " cb=" + r1 + " | ft=" + p2 + " len=" + ((t2 || "").length) + " cb=" + r2 + " | ff2=" + p3 + " len=" + ((t3 || "").length) + " cb=" + r3);
     let verdict;
     if (r2 === 0 && p2 !== p1) {
       verdict = "ft 有效且换新 → ff 一直返陈旧被作废 token,force_refresh:true 可救;真实链路现在应可用了,立刻试手机号";
