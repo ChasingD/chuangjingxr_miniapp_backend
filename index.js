@@ -28,37 +28,50 @@ const APPSECRET = process.env.WECHAT_APPSECRET || "";
 
 let _accessToken = null;
 let _tokenExpireAt = 0;
+let _tokenPromise = null; // 单飞锁：并发请求共享同一次获取，防竞态互相作废（40001 not latest）
 
 async function getAccessToken() {
   if (_accessToken && Date.now() < _tokenExpireAt) return _accessToken;
 
   if (!APPID || !APPSECRET) throw new Error("WECHAT_APPID/APPSECRET 未配置");
 
+  // 并发竞态：两个请求同时见缓存失效，各自取新 token → 微信只认最新，早的那个变 not latest → 40001。
+  // 单飞：在途获取共享，后到的直接等同一个 promise。
+  if (_tokenPromise) return _tokenPromise;
+
   // 用 stable_token 接口（POST /cgi-bin/stable_token）：微信服务端缓存，多实例/重启不互相吊销 token。
   // /cgi-bin/token 每次刷新都会作废上一个 token，云托管多副本各持缓存互相作废 → 40001 invalid credential。
-  const body = JSON.stringify({ grant_type: "client_credential", appid: APPID, secret: APPSECRET, force_refresh: false });
-  const tokenData = await new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: "api.weixin.qq.com",
-      path: "/cgi-bin/stable_token",
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-    }, (resp) => {
-      let d = "";
-      resp.on("data", (c) => (d += c));
-      resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+  _tokenPromise = (async () => {
+    const body = JSON.stringify({ grant_type: "client_credential", appid: APPID, secret: APPSECRET, force_refresh: false });
+    const tokenData = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: "api.weixin.qq.com",
+        path: "/cgi-bin/stable_token",
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+      }, (resp) => {
+        let d = "";
+        resp.on("data", (c) => (d += c));
+        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+      });
+      req.on("error", reject);
+      req.write(body);
+      req.end();
     });
-    req.on("error", reject);
-    req.write(body);
-    req.end();
-  });
 
-  if (tokenData.errcode) throw new Error(`获取 access_token 失败: ${tokenData.errmsg}`);
+    if (tokenData.errcode) throw new Error(`获取 access_token 失败: ${tokenData.errmsg}`);
 
-  _accessToken = tokenData.access_token;
-  _tokenExpireAt = Date.now() + (tokenData.expires_in - 300) * 1000; // 提前5分钟过期
-  console.log("[CS] access_token 已刷新");
-  return _accessToken;
+    _accessToken = tokenData.access_token;
+    _tokenExpireAt = Date.now() + (tokenData.expires_in - 300) * 1000; // 提前5分钟过期
+    console.log("[CS] access_token 已刷新");
+    return _accessToken;
+  })();
+
+  try {
+    return await _tokenPromise;
+  } finally {
+    _tokenPromise = null;
+  }
 }
 
 // ==================== JWT & 微信服务 ====================
