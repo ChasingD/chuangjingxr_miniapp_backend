@@ -34,13 +34,23 @@ async function getAccessToken() {
 
   if (!APPID || !APPSECRET) throw new Error("WECHAT_APPID/APPSECRET 未配置");
 
-  const tokenUrl = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${APPID}&secret=${APPSECRET}`;
+  // 用 stable_token 接口（POST /cgi-bin/stable_token）：微信服务端缓存，多实例/重启不互相吊销 token。
+  // /cgi-bin/token 每次刷新都会作废上一个 token，云托管多副本各持缓存互相作废 → 40001 invalid credential。
+  const body = JSON.stringify({ grant_type: "client_credential", appid: APPID, secret: APPSECRET, force_refresh: false });
   const tokenData = await new Promise((resolve, reject) => {
-    https.get(tokenUrl, (resp) => {
+    const req = https.request({
+      hostname: "api.weixin.qq.com",
+      path: "/cgi-bin/stable_token",
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    }, (resp) => {
       let d = "";
       resp.on("data", (c) => (d += c));
       resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
-    }).on("error", reject);
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
   });
 
   if (tokenData.errcode) throw new Error(`获取 access_token 失败: ${tokenData.errmsg}`);
@@ -94,32 +104,46 @@ async function jscode2session(code) {
  * @returns {string} 纯手机号（不带区号）
  */
 async function getPhoneNumber(phoneCode) {
-  const token = await getAccessToken();
   const payload = JSON.stringify({ code: phoneCode });
-  const apiUrl = `https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=${token}`;
-  const parsed = new URL(apiUrl);
+  const apiUrl = "https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=";
 
-  return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: parsed.hostname,
-      path: parsed.pathname + parsed.search,
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
-    }, (resp) => {
-      let d = "";
-      resp.on("data", (c) => (d += c));
-      resp.on("end", () => {
-        try {
-          const r = JSON.parse(d);
-          if (r.errcode && r.errcode !== 0) reject(new Error(r.errmsg || `errcode=${r.errcode}`));
-          else resolve(r.phone_info.purePhoneNumber);
-        } catch (e) { reject(e); }
+  async function call() {
+    const token = await getAccessToken();
+    const parsed = new URL(apiUrl + token);
+    return new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      }, (resp) => {
+        let d = "";
+        resp.on("data", (c) => (d += c));
+        resp.on("end", () => {
+          try {
+            const r = JSON.parse(d);
+            if (r.errcode && r.errcode !== 0) reject(Object.assign(new Error(r.errmsg || `errcode=${r.errcode}`), { errcode: r.errcode }));
+            else resolve(r.phone_info.purePhoneNumber);
+          } catch (e) { reject(e); }
+        });
       });
+      req.on("error", reject);
+      req.write(payload);
+      req.end();
     });
-    req.on("error", reject);
-    req.write(payload);
-    req.end();
-  });
+  }
+
+  try {
+    return await call();
+  } catch (err) {
+    // 40001 invalid credential：token 被作废 → 清缓存强刷一次再试
+    if (err.errcode === 40001) {
+      _accessToken = null;
+      _tokenExpireAt = 0;
+      return await call();
+    }
+    throw err;
+  }
 }
 
 // ==================== 路由 ====================
