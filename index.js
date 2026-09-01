@@ -36,13 +36,12 @@ async function getAccessToken(forceRefresh = false) {
   if (!APPID || !APPSECRET) throw new Error("WECHAT_APPID/APPSECRET 未配置");
 
   // 并发竞态：两个请求同时见缓存失效，各自取新 token → 微信只认最新，早的那个变 not latest → 40001。
-  // 单飞：在途获取共享，后到的直接等同一个 promise。forceRefresh 必须绕过单飞拿全新 token。
+  // 单飞：在途获取共享，后到的直接等同一个 promise。
   if (!forceRefresh && _tokenPromise) return _tokenPromise;
 
   // 用 stable_token 接口（POST /cgi-bin/stable_token）：微信服务端缓存，多实例/重启不互相吊销 token。
-  // /cgi-bin/token 每次刷新都会作废上一个 token，云托管多副本各持缓存互相作废 → 40001 invalid credential。
-  // force_refresh:false 只回服务端缓存的 stable token；若它已被外部刷新作废（not latest），
-  // 必须 force_refresh:true 强制换新（重试路径用）。
+  // 铁律：本项目永不传 force_refresh:true —— 它会作废该 appid 所有已发 token，云托管多副本互杀 → 40001 not latest。
+  // force_refresh:false 返回微信服务端当前有效 stable token，多副本共享、天然无作废。
   _tokenPromise = (async () => {
     const body = JSON.stringify({ grant_type: "client_credential", appid: APPID, secret: APPSECRET, force_refresh: forceRefresh });
     const tokenData = await new Promise((resolve, reject) => {
@@ -152,13 +151,15 @@ async function getPhoneNumber(phoneCode) {
   try {
     return await call();
   } catch (err) {
-    // 40001 invalid credential：token 被作废 → 清缓存强刷一次再试
+    // 40001 invalid credential：本地缓存 token 可能被作废（云托管多副本各自 force_refresh 会互杀）。
+    // 修复：绝不 force_refresh:true（会作废该 appid 所有已发 token，殃及兄弟容器）。
+    // 只清本地缓存重取 stable_token（force_refresh:false 返回微信服务端当前有效 stable token，多副本共享、不互作废）。
     if (err.errcode === 40001) {
-      console.log("[PHONE] 40001 命中, force_refresh=true 强制换新重试 (errcode=" + err.errcode + ")");
+      console.log("[PHONE] 40001 命中, 清缓存重取 stable_token(force_refresh:false) 重试 (errcode=" + err.errcode + ")");
       _accessToken = null;
       _tokenExpireAt = 0;
       try {
-        const retried = await call(true); // force_refresh:true，必须拿全新 token 才可能成功
+        const retried = await call(); // force_refresh 默认 false：拿当前有效 stable token
         console.log("[PHONE] 重试成功");
         return retried;
       } catch (err2) {
