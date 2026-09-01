@@ -531,7 +531,7 @@ function loadPublicKey() {
 
 // 价目表（后端定价）
 const PRODUCT_PRICES = {
-  vip_count: { "vip-1": 1000, "vip-10": 8000, "vip-30": 18000 },
+  vip_count: { "vip-1": 1000, "vip-10": 7900, "vip-30": 18000 },
   vip_regular: { monthly: 1000, quarter: 2700, yearly: 9800 },
   vip_duration: { "vip-monthly": 9800, "vip-quarterly": 27000, "vip-yearly": 105800 },
   scene_purchase: { "scene-2": 699, "scene-7": 699 },
