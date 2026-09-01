@@ -164,6 +164,31 @@ async function getPhoneNumber(phoneCode) {
         return retried;
       } catch (err2) {
         console.error("[PHONE] 重试也失败: " + err2.message + (err2.errcode ? " (errcode=" + err2.errcode + ")" : ""));
+        // 探针（一次性诊断）：用同一 token 换假 code，区分「token 无效」vs「真 code 归属问题」。
+        // 假 code → 40029 invalid code = token 有效，问题在真 code；假 code → 40001 = token 对 getuserphonenumber 不可用。
+        try {
+          const probeToken = await getAccessToken();
+          const probePayload = JSON.stringify({ code: "PROBE_INVALID_CODE_00000000" });
+          const probeParsed = new URL(apiUrl + probeToken);
+          const probe = await new Promise((resolve, reject) => {
+            const req = https.request({
+              hostname: probeParsed.hostname,
+              path: probeParsed.pathname + probeParsed.search,
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(probePayload) },
+            }, (resp) => {
+              let d = "";
+              resp.on("data", (c) => (d += c));
+              resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+            });
+            req.on("error", reject);
+            req.write(probePayload);
+            req.end();
+          });
+          console.log("[PHONE] 探针假code errcode=" + probe.errcode + " errmsg=" + (probe.errmsg || ""));
+        } catch (e2) {
+          console.log("[PHONE] 探针异常: " + (e2.message || e2));
+        }
         throw err2;
       }
     }
