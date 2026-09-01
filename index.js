@@ -30,19 +30,21 @@ let _accessToken = null;
 let _tokenExpireAt = 0;
 let _tokenPromise = null; // 单飞锁：并发请求共享同一次获取，防竞态互相作废（40001 not latest）
 
-async function getAccessToken() {
-  if (_accessToken && Date.now() < _tokenExpireAt) return _accessToken;
+async function getAccessToken(forceRefresh = false) {
+  if (!forceRefresh && _accessToken && Date.now() < _tokenExpireAt) return _accessToken;
 
   if (!APPID || !APPSECRET) throw new Error("WECHAT_APPID/APPSECRET 未配置");
 
   // 并发竞态：两个请求同时见缓存失效，各自取新 token → 微信只认最新，早的那个变 not latest → 40001。
-  // 单飞：在途获取共享，后到的直接等同一个 promise。
-  if (_tokenPromise) return _tokenPromise;
+  // 单飞：在途获取共享，后到的直接等同一个 promise。forceRefresh 必须绕过单飞拿全新 token。
+  if (!forceRefresh && _tokenPromise) return _tokenPromise;
 
   // 用 stable_token 接口（POST /cgi-bin/stable_token）：微信服务端缓存，多实例/重启不互相吊销 token。
   // /cgi-bin/token 每次刷新都会作废上一个 token，云托管多副本各持缓存互相作废 → 40001 invalid credential。
+  // force_refresh:false 只回服务端缓存的 stable token；若它已被外部刷新作废（not latest），
+  // 必须 force_refresh:true 强制换新（重试路径用）。
   _tokenPromise = (async () => {
-    const body = JSON.stringify({ grant_type: "client_credential", appid: APPID, secret: APPSECRET, force_refresh: false });
+    const body = JSON.stringify({ grant_type: "client_credential", appid: APPID, secret: APPSECRET, force_refresh: forceRefresh });
     const tokenData = await new Promise((resolve, reject) => {
       const req = https.request({
         hostname: "api.weixin.qq.com",
@@ -120,8 +122,9 @@ async function getPhoneNumber(phoneCode) {
   const payload = JSON.stringify({ code: phoneCode });
   const apiUrl = "https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=";
 
-  async function call() {
-    const token = await getAccessToken();
+  async function call(force) {
+    console.log("[PHONE] 兑换: code_len=" + (phoneCode || "").length + " code_head=" + (phoneCode || "").slice(0, 6) + " APPID=" + APPID + " force=" + (force ? 1 : 0));
+    const token = await getAccessToken(force);
     const parsed = new URL(apiUrl + token);
     return new Promise((resolve, reject) => {
       const req = https.request({
@@ -151,11 +154,11 @@ async function getPhoneNumber(phoneCode) {
   } catch (err) {
     // 40001 invalid credential：token 被作废 → 清缓存强刷一次再试
     if (err.errcode === 40001) {
-      console.log("[PHONE] 40001 命中, 清缓存强刷重试 (errcode=" + err.errcode + ")");
+      console.log("[PHONE] 40001 命中, force_refresh=true 强制换新重试 (errcode=" + err.errcode + ")");
       _accessToken = null;
       _tokenExpireAt = 0;
       try {
-        const retried = await call();
+        const retried = await call(true); // force_refresh:true，必须拿全新 token 才可能成功
         console.log("[PHONE] 重试成功");
         return retried;
       } catch (err2) {
@@ -1150,7 +1153,7 @@ async function bootstrap() {
     console.log("虚拟支付道具查询: GET /api/virtual-pay/query-goods?env=1");
     console.log("虚拟支付发货: POST /api/virtual-pay/deliver");
     console.log("虚拟支付退款: POST /api/virtual-pay/refund");
-    console.log(`WECHAT_APPID: ${APPID ? "已配置" : "❌ 未配置"}`);
+    console.log(`WECHAT_APPID: ${APPID ? APPID : "❌ 未配置"}`);
     console.log(`WECHAT_APPSECRET: ${APPSECRET ? "已配置" : "❌ 未配置"}`);
     console.log(`WECHAT_PAY_MCHID: ${PAY_MCHID ? "已配置" : "❌ 未配置"}`);
     console.log(`VIRTUAL_PAY_OFFER_ID: ${VIRTUAL_PAY_OFFER_ID ? "已配置" : "❌ 未配置"}`);
