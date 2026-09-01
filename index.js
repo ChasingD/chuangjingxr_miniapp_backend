@@ -151,9 +151,17 @@ async function getPhoneNumber(phoneCode) {
   } catch (err) {
     // 40001 invalid credential：token 被作废 → 清缓存强刷一次再试
     if (err.errcode === 40001) {
+      console.log("[PHONE] 40001 命中, 清缓存强刷重试 (errcode=" + err.errcode + ")");
       _accessToken = null;
       _tokenExpireAt = 0;
-      return await call();
+      try {
+        const retried = await call();
+        console.log("[PHONE] 重试成功");
+        return retried;
+      } catch (err2) {
+        console.error("[PHONE] 重试也失败: " + err2.message + (err2.errcode ? " (errcode=" + err2.errcode + ")" : ""));
+        throw err2;
+      }
     }
     throw err;
   }
