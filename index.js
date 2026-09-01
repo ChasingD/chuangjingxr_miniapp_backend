@@ -459,8 +459,9 @@ app.get("/api/wechat-cs/config-status", (req, res) => {
  * Body: { phoneCode } → { phoneNumber }
  */
 app.post("/api/wechat/exchange-phone", async (req, res) => {
-  const { phoneCode } = req.body || {};
+  const { phoneCode, appid } = req.body || {};
   if (!phoneCode) return res.send({ code: 400, msg: "缺少 phoneCode", data: null });
+  console.log("[PHONE] code 自报 appid:", appid || "❌ 前端未传", "| 后端 token APPID:", APPID, "| 一致?", appid === APPID ? "✅" : "❌ 错配");
 
   try {
     const phoneNumber = await getPhoneNumber(phoneCode);
