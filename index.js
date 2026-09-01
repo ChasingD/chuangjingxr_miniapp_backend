@@ -118,6 +118,15 @@ async function jscode2session(code) {
  *  ② 同 token 调 /cgi-bin/getcallbackip —— 0+IP列表=token 全局有效 / 40001=token 全局坏(appid/secret/被作废)
  * @returns {Promise<void>} 仅打日志
  */
+async function cbCheck(token) {
+  const parsed = new URL("https://api.weixin.qq.com/cgi-bin/getcallbackip?access_token=" + token);
+  return new Promise((resolve) => {
+    const req = https.request({ hostname: parsed.hostname, path: parsed.pathname + parsed.search, method: "GET" },
+      (resp) => { let d = ""; resp.on("data", (c) => (d += c)); resp.on("end", () => { try { const r = JSON.parse(d); resolve(r.errcode || 0); } catch (e) { resolve(-1); } }); });
+    req.on("error", () => resolve(-2)); req.end();
+  });
+}
+
 async function probeTokenHealth(tag) {
   try {
     const token = await getAccessToken();
@@ -130,20 +139,42 @@ async function probeTokenHealth(tag) {
       }, (resp) => { let d = ""; resp.on("data", (c) => (d += c)); resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } }); });
       req.on("error", reject); req.write(phPayload); req.end();
     });
-    const cbParsed = new URL("https://api.weixin.qq.com/cgi-bin/getcallbackip?access_token=" + token);
-    const cb = await new Promise((resolve, reject) => {
-      const req = https.request({ hostname: cbParsed.hostname, path: cbParsed.pathname + cbParsed.search, method: "GET" },
-        (resp) => { let d = ""; resp.on("data", (c) => (d += c)); resp.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } }); });
-      req.on("error", reject); req.end();
-    });
-    console.log("[PROBE:" + tag + "] 假code errcode=" + ph.errcode + " (" + (ph.errmsg || "") + ") | getcallbackip errcode=" + cb.errcode + " (" + (cb.errmsg || "") + ") " + (Array.isArray(cb.ip_list) ? "ip_count=" + cb.ip_list.length : ""));
+    const cb = await cbCheck(token);
+    console.log("[PROBE:" + tag + "] 假code errcode=" + ph.errcode + " (" + (ph.errmsg || "") + ") | getcallbackip errcode=" + cb + " " + (cb === 0 ? "ip_list=ok" : ""));
     console.log("[PROBE:" + tag + "] 判别: " + (
-      cb.errcode === 0 ? "token 全局有效 → 问题在 getuserphonenumber 自身(能力/主体/平台)" :
-      cb.errcode === 40001 ? "token 全局坏 → appid/secret 或 被兄弟容器 force_refresh 作废" :
-      "异常(err=" + cb.errcode + ")"
+      cb === 0 ? "token 全局有效 → 问题在 getuserphonenumber 自身(能力/主体/平台)" :
+      cb === 40001 ? "token 全局坏 → 陈旧缓存被外部作废,force_refresh:true 或可救(跑 probe=2 验证)" :
+      "异常(err=" + cb + ")"
     ));
   } catch (e) {
     console.log("[PROBE:" + tag + "] 探针异常: " + (e.message || e));
+  }
+}
+
+/** 旋转取证:ff(缓存) vs ft(强制新取) 三者对比,判断陈旧缓存 vs 持续外部轮换 */
+async function probeTokenRotation() {
+  try {
+    const t1 = await getAccessToken();        // ff: 现有缓存(可能陈旧)
+    const r1 = await cbCheck(t1);
+    const t2 = await getAccessToken(true);    // ft: 强制新取(会作废 t1,单容器诊断可接受)
+    const r2 = await cbCheck(t2);
+    const t3 = await getAccessToken();        // ff: 看新取后缓存是否稳定返回 t2
+    const r3 = await cbCheck(t3);
+    const p1 = t1.slice(0, 8), p2 = t2.slice(0, 8), p3 = t3.slice(0, 8);
+    console.log("[PROBE:rotation] ff=" + p1 + " cb=" + r1 + " | ft=" + p2 + " cb=" + r2 + " | ff2=" + p3 + " cb=" + r3);
+    let verdict;
+    if (r2 === 0 && p2 !== p1) {
+      verdict = "ft 有效且换新 → ff 一直返陈旧被作废 token,force_refresh:true 可救;真实链路现在应可用了,立刻试手机号";
+    } else if (r2 === 0 && p2 === p1) {
+      verdict = "ft 与 ff 同 token 且有效 → ff 其实有效,40001 是调用前被外部轮换,外部 actor 持续在抢";
+    } else if (r2 === 40001) {
+      verdict = "ft 强制新取也 40001 → appid/secret 平台级坏:查 MP 后台 secret 是否最新、小程序是否第三方代开发绑定";
+    } else {
+      verdict = "异常 r2=" + r2;
+    }
+    console.log("[PROBE:rotation] 判别: " + verdict);
+  } catch (e) {
+    console.log("[PROBE:rotation] 异常: " + (e.message || e));
   }
 }
 
@@ -482,6 +513,9 @@ app.get("/api/wechat-cs/config-status", async (req, res) => {
   if (req.query.probe === "1") {
     await probeTokenHealth("config-status"); // 双 API 判别 token 全局 vs 仅 getuserphonenumber
     probeResult = { triggered: true, seeServerLog: "[PROBE:config-status]" };
+  } else if (req.query.probe === "2") {
+    await probeTokenRotation(); // ff/ft 三取对比:陈旧缓存 vs 持续外部轮换(顺带 ft 治疗)
+    probeResult = { triggered: true, seeServerLog: "[PROBE:rotation]" };
   }
   res.send({
     code: 200, msg: "ok",
